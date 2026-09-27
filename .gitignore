@@ -1,0 +1,12 @@
+# entorno y cachés
+.venv/
+__pycache__/
+
+# modelos descargados y perfiles (Vosk, Whisper, Edge, WebView2)
+modelos/
+
+# datos generados en ejecución
+capturas/
+asistente.log
+historial.json
+respuesta.mp3
