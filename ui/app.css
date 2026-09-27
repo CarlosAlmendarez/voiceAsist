@@ -46,7 +46,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 body[data-estado="reposo"] .orb .nucleo { filter: saturate(.85) brightness(.9); }
 body[data-estado="cargando"] .orb .nucleo { filter: grayscale(.8) brightness(.6); }
-body[data-estado="escuchando"] .orb .nucleo {
+body[data-estado="escuchando"] .orb .nucleo,
+body[data-estado="confirmando"] .orb .nucleo {
   animation: none;
   transform: scale(calc(1 + var(--nivel) * .32));
   box-shadow: 0 0 calc(24px + var(--nivel) * 40px) rgba(125, 170, 255, .75), inset -5px -7px 16px rgba(18, 8, 60, .45);
@@ -55,6 +56,8 @@ body[data-estado="pensando"] .orb .anillo,
 body[data-estado="transcribiendo"] .orb .anillo { opacity: 1; animation: girar 1.1s linear infinite; }
 body[data-estado="hablando"] .orb .onda { animation: onda 1.8s ease-out infinite; }
 body[data-estado="hablando"] .orb .onda.o2 { animation-delay: .9s; }
+/* tarea en segundo plano: un anillo lento en el orbe aunque esté en reposo */
+body.trabajando[data-estado="reposo"] .orb .anillo { opacity: .6; animation: girar 3s linear infinite; }
 body.silenciado .orb .nucleo { filter: grayscale(1) brightness(.45); animation: none; }
 
 @keyframes respirar { 0%, 100% { transform: scale(.94); } 50% { transform: scale(1); } }
@@ -90,7 +93,8 @@ header {
 .titulo { flex: 1; display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .titulo strong { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
 #estado-texto { font-size: 12.5px; color: var(--tenue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-body[data-estado="escuchando"] #estado-texto { color: var(--acento); }
+body[data-estado="escuchando"] #estado-texto,
+body[data-estado="confirmando"] #estado-texto { color: var(--acento); }
 
 .icono {
   width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
@@ -242,3 +246,36 @@ body.silenciado #btn-mic .mic-on { display: none; }
 body.silenciado #btn-mic .mic-off { display: block; }
 #btn-detener { display: none; }
 body[data-estado="hablando"] #btn-detener { display: grid; color: var(--texto); }
+
+/* ---------------- tareas ---------------- */
+.btn {
+  padding: 5px 12px; border-radius: 9px; font-size: 12.5px; font-weight: 600;
+  background: var(--superficie-2); border: 1px solid var(--borde); transition: border-color .15s, background .15s;
+}
+.btn:hover { border-color: rgba(138, 180, 255, .4); }
+.btn.si { background: rgba(138, 180, 255, .16); color: var(--acento); }
+.btn.no { color: var(--texto-2); }
+
+.confirmar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border-radius: 12px; font-size: 13px; color: var(--texto-2);
+  border: 1px solid rgba(138, 180, 255, .3); background: rgba(138, 180, 255, .06);
+  animation: subir .3s ease-out;
+}
+.confirmar span { flex: 1; min-width: 160px; }
+.confirmar b { color: var(--texto); font-weight: 600; }
+.confirmar.hecho { border-color: var(--borde); background: none; color: var(--tenue); font-size: 12.5px; padding: 6px 12px; }
+
+.tarea .pasos { padding: 10px 12px; }
+.tarea .pasos:empty { display: none; }
+.tarea .cancelar { padding: 2px 9px; font-size: 11.5px; }
+.tarea:not([data-estado="en_curso"]) .cancelar { display: none; }
+.tarea[data-estado="en_curso"] { border-color: rgba(138, 180, 255, .3); }
+.tarea[data-estado="en_curso"] .estado-tarea { color: var(--acento); }
+.tarea[data-estado="hecha"] .estado-tarea { color: var(--ok); }
+.tarea[data-estado="error"] .estado-tarea { color: var(--mal); }
+
+.aviso .pregunta {
+  align-self: flex-start; border-radius: 16px 16px 16px 4px;
+  background: rgba(138, 180, 255, .1); color: var(--acento);
+}

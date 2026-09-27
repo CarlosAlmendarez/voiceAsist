@@ -11,7 +11,9 @@ const ESTADOS = {
   transcribiendo: "Entendiendo…",
   pensando: "Pensando…",
   hablando: "Respondiendo",
+  confirmando: "¿Lo hago? Di «sí» o «no»",
 };
+const ESTADOS_TAREA = { en_curso: "Trabajando", hecha: "Terminada", error: "Falló", cancelada: "Cancelada" };
 
 let actual = null;        // intercambio en curso
 let cfg = { segundos_ocultar: 60, palabra: "asistente" };
@@ -105,6 +107,7 @@ function mostrarRespuesta(nodo, r) {
     r.tarjetas.forEach(t => cont.appendChild(tarjeta(t)));
     nodo.appendChild(cont);
   }
+  nodo.querySelectorAll(".confirmar").forEach(c => nodo.appendChild(c));  // la pregunta de confirmación, al final
   // deja a la vista el inicio del intercambio (la frase que se está leyendo), no el final
   conv.scrollTop = nodo.offsetTop - conv.offsetTop - 12;
 }
@@ -209,6 +212,42 @@ function construirTarjeta(t) {
   }
 }
 
+/* ---------- tareas ---------- */
+function pedirConfirmacion(e) {
+  if (!actual) actual = nuevoIntercambio("…");
+  const n = el(`<div class="confirmar" data-id="${esc(e.id)}">
+      <span>¿Ejecuto <b>${esc(e.descripcion)}</b>?</span>
+      <button class="btn si">Sí, hazlo</button><button class="btn no">No</button></div>`);
+  $(".si", n).onclick = () => api()?.confirmar(true);
+  $(".no", n).onclick = () => api()?.confirmar(false);
+  actual.appendChild(n);
+  bajar();
+}
+
+function actualizarTarea(e) {
+  let n = document.querySelector(`.tarea[data-id="${CSS.escape(e.id)}"]`);
+  if (!n) {
+    if (!actual) actual = nuevoIntercambio("…");
+    n = el(`<div class="tarjeta tarea" data-id="${esc(e.id)}">
+        <div class="cab"><b>${esc(e.descripcion || "Tarea")}</b><span class="dom estado-tarea"></span>
+          <button class="btn no cancelar">Cancelar</button></div>
+        <ul class="pasos"></ul></div>`);
+    $(".cancelar", n).onclick = () => api()?.cancelar_tarea(e.id);
+    actual.appendChild(n);
+    bajar();
+  }
+  n.dataset.estado = e.estado;
+  $(".estado-tarea", n).textContent = ESTADOS_TAREA[e.estado] || e.estado;
+  const lista = $(".pasos", n);
+  if (e.paso) {
+    lista.querySelectorAll("li:not(.hecho)").forEach(li => li.classList.add("hecho"));
+    lista.appendChild(el(`<li>${esc(e.paso)}</li>`));
+    while (lista.children.length > 4) lista.firstElementChild.remove();  // solo los últimos pasos
+  }
+  if (e.estado !== "en_curso") lista.querySelectorAll("li").forEach(li => li.classList.add("hecho"));
+  document.body.classList.toggle("trabajando", !!document.querySelector('.tarea[data-estado="en_curso"]'));
+}
+
 /* ---------- historial ---------- */
 async function abrirHistorial() {
   const lista = $("#hist-lista");
@@ -238,8 +277,8 @@ window.app = {
         document.body.dataset.estado = e.estado;
         $("#estado-texto").textContent = document.body.classList.contains("silenciado") && e.estado === "reposo"
           ? "Micrófono silenciado" : ESTADOS[e.estado] || e.estado;
-        if (["escuchando", "pensando", "transcribiendo"].includes(e.estado)) abrirPanel();
-        if (e.estado === "escuchando") document.documentElement.style.setProperty("--nivel", 0);
+        if (["escuchando", "pensando", "transcribiendo", "confirmando"].includes(e.estado)) abrirPanel();
+        if (["escuchando", "confirmando"].includes(e.estado)) document.documentElement.style.setProperty("--nivel", 0);
         if (e.estado === "reposo" && document.body.classList.contains("panel")) programarOcultar();
         break;
       case "nivel":
@@ -264,6 +303,23 @@ window.app = {
         if (viejo) viejo.replaceWith(tarjeta(e.tarjeta));
         break;
       }
+      case "confirmar":
+        pedirConfirmacion(e);
+        break;
+      case "confirmado": {
+        const n = document.querySelector(`.confirmar[data-id="${CSS.escape(e.id)}"]`);
+        if (n) n.outerHTML = `<div class="confirmar hecho">${e.valor ? "Confirmada, en marcha." : "Descartada."}</div>`;
+        break;
+      }
+      case "tarea":
+        actualizarTarea(e);
+        break;
+      case "aviso":
+        abrirPanel();
+        actual = nuevoIntercambio(e.texto);
+        actual.classList.add("aviso");
+        programarOcultar();
+        break;
       case "silenciado":
         document.body.classList.toggle("silenciado", e.valor);
         $("#estado-texto").textContent = e.valor ? "Micrófono silenciado" : ESTADOS[document.body.dataset.estado];

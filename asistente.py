@@ -112,6 +112,12 @@ class Api:
     def nueva(self):
         m.nueva_conversacion()
 
+    def confirmar(self, valor):
+        m.confirmar(bool(valor))
+
+    def cancelar_tarea(self, tid):
+        m.cancelar_tarea(tid)
+
     def historial(self):
         return [{"i": i, "fecha": h["fecha"], "pregunta": h["pregunta"]}
                 for i, h in enumerate(motor.cargar_historial())][::-1]
