@@ -216,7 +216,7 @@ function construirTarjeta(t) {
 function pedirConfirmacion(e) {
   if (!actual) actual = nuevoIntercambio("…");
   const n = el(`<div class="confirmar" data-id="${esc(e.id)}">
-      <span>¿Ejecuto <b>${esc(e.descripcion)}</b>?</span>
+      <span>${esc(e.pregunta)}</span>
       <button class="btn si">Sí, hazlo</button><button class="btn no">No</button></div>`);
   $(".si", n).onclick = () => api()?.confirmar(true);
   $(".no", n).onclick = () => api()?.confirmar(false);
@@ -308,7 +308,7 @@ window.app = {
         break;
       case "confirmado": {
         const n = document.querySelector(`.confirmar[data-id="${CSS.escape(e.id)}"]`);
-        if (n) n.outerHTML = `<div class="confirmar hecho">${e.valor ? "Confirmada, en marcha." : "Descartada."}</div>`;
+        if (n) n.outerHTML = `<div class="confirmar hecho">${e.valor ? "Confirmado." : "Descartado."}</div>`;
         break;
       }
       case "tarea":

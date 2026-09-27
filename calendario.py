@@ -30,10 +30,45 @@ def credenciales() -> Path:
     return next((BASE / "kys").glob("*.json"))  # el primer JSON de la carpeta kys
 
 
-def sesion() -> AuthorizedSession:
+def sesion(escritura: bool = False) -> AuthorizedSession:
+    alcance = "calendar.events" if escritura else "calendar.readonly"
     cred = service_account.Credentials.from_service_account_file(
-        str(credenciales()), scopes=["https://www.googleapis.com/auth/calendar.readonly"])
+        str(credenciales()), scopes=[f"https://www.googleapis.com/auth/{alcance}"])
     return AuthorizedSession(cred)
+
+
+REPETIR = {"diario": "DAILY", "semanal": "WEEKLY", "mensual": "MONTHLY", "anual": "YEARLY"}
+
+
+def crear_evento(ev: dict) -> dict:
+    """Crea un evento en el primer calendario configurado. `ev` viene de Claude:
+    titulo, inicio ("AAAA-MM-DD" = todo el día, o "AAAA-MM-DDTHH:MM"), y opcionales
+    fin, repetir, lugar, descripcion, recordatorio_min. Devuelve el evento creado."""
+    cuerpo = {"summary": ev["titulo"]}
+    if "T" in ev["inicio"]:
+        a = datetime.fromisoformat(ev["inicio"]).astimezone()  # sin zona = hora local
+        b = datetime.fromisoformat(ev["fin"]).astimezone() if ev.get("fin") else a + timedelta(hours=1)
+        cuerpo["start"], cuerpo["end"] = {"dateTime": a.isoformat()}, {"dateTime": b.isoformat()}
+    else:  # todo el día: Google toma el fin como exclusivo
+        a = date.fromisoformat(ev["inicio"])
+        b = date.fromisoformat(ev["fin"][:10]) + timedelta(days=1) if ev.get("fin") else a + timedelta(days=1)
+        cuerpo["start"], cuerpo["end"] = {"date": a.isoformat()}, {"date": b.isoformat()}
+        cuerpo["transparency"] = "transparent"  # no marca el día como ocupado
+    if REPETIR.get(ev.get("repetir")):
+        cuerpo["recurrence"] = [f"RRULE:FREQ={REPETIR[ev['repetir']]}"]
+    if ev.get("lugar"):
+        cuerpo["location"] = ev["lugar"]
+    if ev.get("descripcion"):
+        cuerpo["description"] = ev["descripcion"]
+    if ev.get("recordatorio_min") is not None:
+        cuerpo["reminders"] = {"useDefault": False,
+                               "overrides": [{"method": "popup", "minutes": int(ev["recordatorio_min"])}]}
+    cid = CFG["calendarios_google"][0]
+    r = sesion(escritura=True).post(f"{API}/calendars/{cid}/events", json=cuerpo, timeout=20)
+    if r.status_code in (403, 404):
+        raise PermissionError(r.json().get("error", {}).get("message", r.text[:200]))
+    r.raise_for_status()
+    return r.json()
 
 
 def fecha(texto: str) -> date:

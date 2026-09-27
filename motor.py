@@ -266,13 +266,24 @@ def interpretar(texto: str) -> dict:
             tarea = data.get("tarea")
             if not (isinstance(tarea, dict) and tarea.get("descripcion") and tarea.get("plan")):
                 tarea = None
+            evento = data.get("evento")
+            if not (isinstance(evento, dict) and evento.get("titulo") and evento.get("inicio")):
+                evento = None
             return {"voz": str(data["voz"]), "detalle": str(data.get("detalle") or ""),
-                    "tarjetas": tarjetas[:4], "tarea": tarea}
+                    "tarjetas": tarjetas[:4], "tarea": tarea, "evento": evento}
     except (json.JSONDecodeError, ValueError):
         pass
     # respuesta sin formato: la primera parte se lee, el resto se muestra
     frases = re.split(r"(?<=[.!?])\s+", texto.strip())
-    return {"voz": " ".join(frases[:2]), "detalle": " ".join(frases[2:]), "tarjetas": [], "tarea": None}
+    return {"voz": " ".join(frases[:2]), "detalle": " ".join(frases[2:]), "tarjetas": [],
+            "tarea": None, "evento": None}
+
+
+def describir_evento(ev: dict) -> str:
+    cuando = ev["inicio"].replace("T", " ") + (f" → {ev['fin'].replace('T', ' ')}" if ev.get("fin") else "")
+    repetir = {"diario": "cada día", "semanal": "cada semana", "mensual": "cada mes", "anual": "cada año"}
+    extras = [x for x in (repetir.get(ev.get("repetir") or ""), ev.get("lugar")) if x]
+    return f"{ev['titulo']} — {cuando}" + (f" ({', '.join(extras)})" if extras else "")
 
 
 def es_si_o_no(texto: str) -> bool | None:
@@ -504,7 +515,10 @@ class Motor:
 
 Agenda: puedes leer el Google Calendar del usuario (solo lectura) ejecutando con Bash exactamente:
   {CALENDARIO} eventos --desde hoy|mañana|AAAA-MM-DD --dias N [--buscar "texto"]
-Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento). No puedes crear, mover ni borrar eventos: si te lo piden, dilo."""
+Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento).
+Si el usuario pide AÑADIR un evento, cita, recordatorio o cumpleaños, no uses "tarea": añade al JSON
+  "evento": {{"titulo": "...", "inicio": "AAAA-MM-DD" (todo el día) o "AAAA-MM-DDTHH:MM", "fin": opcional (mismo formato; por defecto 1 hora o 1 día), "repetir": opcional "diario"|"semanal"|"mensual"|"anual", "lugar": opcional, "descripcion": opcional, "recordatorio_min": opcional (minutos antes)}}
+Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 de diciembre). Los cumpleaños y aniversarios son de todo el día y se repiten cada año; su título es "Cumpleaños de <nombre>". Si falta la hora de una cita, pregúntala en vez de inventarla. En "voz" repite qué vas a añadir y cuándo, y termina preguntando si lo confirmas; nunca digas que ya está añadido. No puedes mover ni borrar eventos: si te lo piden, dilo."""
         if self.proyectos:
             lista = "\n".join(f"- {n}: {p}" for n, p in sorted(self.proyectos.items()))
             texto += f"\n\nProyectos conocidos del usuario (nombre: carpeta):\n{lista}"
@@ -631,26 +645,53 @@ Agenda: puedes leer el Google Calendar del usuario (solo lectura) ejecutando con
             return
         emitir({"tipo": "estado", "estado": "pensando"})
         resp = self.preguntar_a_claude(texto)
-        tarea = resp.pop("tarea", None)
+        tarea, evento = resp.pop("tarea", None), resp.pop("evento", None)
         log(f"Asistente: {resp['voz']}")
         if tarea:
-            tarea["id"] = f"k{int(time.time() * 1000)}"
-            resp["detalle"] = (resp["detalle"] + "\n\n" if resp["detalle"] else "") + \
-                f"**Tarea propuesta:** {tarea['descripcion']}\n`{tarea.get('carpeta', '')}`\n{tarea['plan']}"
+            propuesta = f"**Tarea propuesta:** {tarea['descripcion']}\n`{tarea.get('carpeta', '')}`\n{tarea['plan']}"
+            pregunta = f"¿Ejecuto «{tarea['descripcion']}»?"
+        elif evento:
+            propuesta = f"**Evento propuesto:** {describir_evento(evento)}"
+            pregunta = f"¿Añado «{evento['titulo']}» a tu calendario?"
+        cid = f"k{int(time.time() * 1000)}"
+        if tarea or evento:
+            resp["detalle"] = (resp["detalle"] + "\n\n" if resp["detalle"] else "") + propuesta
             while not self.confirmaciones.empty():  # clics viejos no cuentan
                 self.confirmaciones.get_nowait()
-            emitir({"tipo": "confirmar", "id": tarea["id"], "descripcion": tarea["descripcion"]})
+            emitir({"tipo": "confirmar", "id": cid, "pregunta": pregunta})
         self.responder(texto, resp)
-        if not tarea:
+        if not (tarea or evento):
             return
         ok = self.pedir_confirmacion()
-        emitir({"tipo": "confirmado", "id": tarea["id"], "valor": ok})
-        log(f"Tarea {'confirmada' if ok else 'descartada'}: {tarea['descripcion']}")
-        if ok:
+        emitir({"tipo": "confirmado", "id": cid, "valor": ok})
+        log(f"{'Confirmado' if ok else 'Descartado'}: {pregunta}")
+        if not ok:
+            self.hablar("Vale, no hago nada.")
+        elif tarea:
+            tarea["id"] = cid
             self.lanzar_tarea(tarea)
             self.hablar("De acuerdo, empiezo. Te aviso cuando termine.")
         else:
-            self.hablar("Vale, no hago nada.")
+            self.crear_evento(evento)
+
+    def crear_evento(self, evento: dict) -> None:
+        import calendario  # carga google-auth solo cuando hace falta
+        try:
+            creado = calendario.crear_evento(evento)
+        except PermissionError as e:
+            log(f"Calendario sin permiso de escritura: {e}")
+            self.decir("No tengo permiso para añadir eventos. En Google Calendar, cambia el permiso de la "
+                       "cuenta del asistente a «Hacer cambios en los eventos».")
+            return
+        except Exception as e:
+            log(f"No se pudo crear el evento: {e}")
+            self.decir("No pude crear el evento. Revisa el registro.")
+            return
+        log(f"Evento creado: {describir_evento(evento)} ({creado.get('htmlLink')})")
+        emitir({"tipo": "respuesta", "voz": "Listo, ya está en tu calendario.", "detalle": "",
+                "tarjetas": [{"tipo": "fuentes", "enlaces": [
+                    {"titulo": f"Ver «{evento['titulo']}» en Google Calendar", "url": creado.get("htmlLink", "")}]}]})
+        self.hablar("Listo, ya está en tu calendario.")
 
     # --- bucle principal ---
     def ejecutar(self) -> None:
