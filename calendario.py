@@ -79,9 +79,13 @@ def eventos(desde: date, dias: int, buscar: str | None) -> int:
     filas, errores = [], []
     for cid in ids:
         r = s.get(f"{API}/calendars/{cid}/events", params=params, timeout=20)
-        if r.status_code in (403, 404):
-            errores.append(f"Sin acceso al calendario {cid}: compártelo con la cuenta de servicio "
-                           f"(Configuración del calendario > Compartir con personas específicas).")
+        if r.status_code == 404:
+            errores.append(f"El calendario {cid} no está compartido con la cuenta de servicio "
+                           f"{s.credentials.service_account_email} (o ese ID de calendario no existe). "
+                           f"Compártelo en Configuración del calendario > Compartir con personas específicas.")
+            continue
+        if r.status_code == 403:
+            errores.append(f"Google negó el acceso al calendario {cid}: {r.json().get('error', {}).get('message', '')}")
             continue
         r.raise_for_status()
         for ev in r.json().get("items", []):
