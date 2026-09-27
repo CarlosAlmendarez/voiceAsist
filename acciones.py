@@ -32,7 +32,9 @@ SITIOS = {"youtube": "https://www.youtube.com", "google": "https://www.google.co
           "gmail": "https://mail.google.com", "correo": "https://mail.google.com",
           "calendario": "https://calendar.google.com", "whatsapp": "https://web.whatsapp.com",
           "netflix": "https://www.netflix.com", "github": "https://github.com",
-          "drive": "https://drive.google.com", "maps": "https://maps.google.com"}
+          "drive": "https://drive.google.com", "maps": "https://maps.google.com",
+          "youtube music": "https://music.youtube.com", "musica": "https://music.youtube.com",
+          "podcasts": "https://music.youtube.com/podcasts", "podcast": "https://music.youtube.com/podcasts"}
 APPS_FIJAS = {"calculadora": "calc.exe", "bloc de notas": "notepad.exe", "explorador": "explorer.exe",
               "explorador de archivos": "explorer.exe", "configuracion": "ms-settings:",
               "administrador de tareas": "taskmgr.exe", "panel de control": "control.exe"}
@@ -139,6 +141,43 @@ def abrir(objetivo: str) -> dict | None:
         webbrowser.open(SITIOS[objetivo])
         return resp(f"Abriendo {objetivo}.")
     return resp(f"No encontré la aplicación {objetivo}.")
+
+
+# ---------- música y podcasts (YouTube Music en el navegador) ----------
+def buscar_youtube(consulta: str, ultimo_episodio: bool) -> tuple[dict | None, str]:
+    """Busca en YouTube sin clave (yt-dlp). Con `ultimo_episodio`, localiza el canal del
+    podcast y toma su video más reciente de 15 minutos o más (se salta clips y shorts).
+    Devuelve (video, nombre del canal o "")."""
+    import yt_dlp
+    ydl = yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True,
+                            "playlistend": 15, "extractor_args": {"youtube": {"lang": ["es"]}}})
+    entradas = ydl.extract_info(f"ytsearch5:{consulta}{' podcast' if ultimo_episodio else ''}",
+                                download=False).get("entries") or []
+    videos = [e for e in entradas if e.get("ie_key") == "Youtube"]
+    if ultimo_episodio:
+        # el canal viene como resultado propio o, si no, es el del primer video
+        tab = next((e for e in entradas if e.get("ie_key") == "YoutubeTab" and str(e.get("id")).startswith("UC")), None)
+        canal_id = tab["id"] if tab else videos[0].get("channel_id") if videos else None
+        nombre = (tab.get("channel") or tab.get("title")) if tab else videos[0].get("channel") if videos else ""
+        if canal_id:
+            recientes = ydl.extract_info(f"https://www.youtube.com/channel/{canal_id}/videos",
+                                         download=False).get("entries") or []
+            video = next((e for e in recientes if (e.get("duration") or 0) >= 900), recientes[0] if recientes else None)
+            if video:
+                return video, nombre or ""
+    return (videos[0] if videos else None), ""
+
+
+def reproducir(consulta: str, ultimo_episodio: bool) -> dict:
+    import webbrowser
+    video, canal = buscar_youtube(consulta, ultimo_episodio)
+    if not video:
+        return resp(f"No encontré {consulta} en YouTube Music.")
+    url = f"https://music.youtube.com/watch?v={video['id']}"
+    webbrowser.open(url)
+    voz = f"Poniendo el último episodio de {canal}." if canal else f"Poniendo {consulta.title()}."
+    return resp(voz, f"**{video.get('title', '')}**", terminar=True,
+                tarjetas=[{"tipo": "fuentes", "enlaces": [{"titulo": video.get("title", consulta), "url": url}]}])
 
 
 # ---------- clima (Open-Meteo, sin clave) ----------
@@ -278,7 +317,7 @@ def atajo(texto: str, motor) -> dict | None:
 
     # música y video (teclas multimedia: funcionan con Spotify, YouTube, etc.)
     if re.fullmatch(r"(pausa|pausar|deten|para|pon pausa a|reanuda|continua|reproduce|dale play a|quita la pausa a)"
-                    r"( la| el)? (musica|cancion|video|reproduccion|spotify)|pausa|play", t):
+                    r"( la| el)? (musica|cancion|video|reproduccion|podcast|episodio)|pausa|play", t):
         tecla(0xB3)  # VK_MEDIA_PLAY_PAUSE
         return resp("", "⏯ Pausa / reproducción", terminar=True)
     if re.fullmatch(r"(siguiente|pasa|salta(te)?|cambia)( la| a la| esta| de)? (cancion|tema|video)( siguiente)?|siguiente|la siguiente", t):
@@ -302,6 +341,22 @@ def atajo(texto: str, motor) -> dict | None:
             fin = ahora + timedelta(minutes=minutos)
             return resp(f"Listo, te aviso a {hora_hablada(fin)}." if minutos >= 5
                         else f"Listo, {m.group(5)}{m.group(7) or ''} {m.group(8)}.")
+
+    # podcasts y música
+    m = (re.fullmatch(r"(pon|ponme|reproduce|quiero escuchar)( el)? (ultimo |nuevo )?(episodio|capitulo)"
+                      r"( mas reciente| nuevo)? de( el podcast)? (.+)", t)
+         or re.fullmatch(r"(pon|ponme|reproduce|quiero escuchar)( el| un)? podcast( de)? (.+)", t))
+    if m:
+        return reproducir(m.group(m.lastindex), ultimo_episodio=True)
+    m = (re.fullmatch(r"(pon|ponme|reproduce|quiero escuchar)( la| el| un poco de| algo de)? "
+                      r"(musica|cancion|canciones|album|disco)( de)? (.+)", t)
+         or re.fullmatch(r"(reproduce|quiero escuchar) (.+)", t))
+    if m:
+        return reproducir(m.group(m.lastindex), ultimo_episodio=False)
+    if re.fullmatch(r"(pon|ponme|abre) (musica|un podcast|podcasts|youtube music)", t):
+        import webbrowser
+        webbrowser.open(SITIOS["podcasts" if "podcast" in t else "youtube music"])
+        return resp("Abriendo YouTube Music.", terminar=True)
 
     # abrir aplicaciones o sitios
     m = re.fullmatch(r"(abre|abrir|abreme|inicia|ejecuta|lanza) (el |la |los |las |mi |un |una )?([a-z0-9 +.]{2,40})", t)

@@ -1,6 +1,6 @@
 {
   "palabra_activacion": "asistente",
-  "confianza_minima": 0.7,
+  "confianza_minima": 0.75,
   "carpeta_proyectos": "C:\\Users\\balme",
   "modelo_whisper": "small",
   "confianza_minima_transcripcion": -1.0,
