@@ -106,7 +106,8 @@ def formatear(ev: dict, calendario: str, varios: bool) -> str:
     return " | ".join(partes)
 
 
-def eventos(desde: date, dias: int, buscar: str | None) -> int:
+def listar(desde: date, dias: int, buscar: str | None = None) -> tuple[list[tuple[str, dict]], list[str]]:
+    """Eventos (calendario, evento de la API) ordenados por inicio, y avisos de acceso."""
     s = sesion()
     ids = CFG.get("calendarios_google") or []
     zona = datetime.now().astimezone().tzinfo
@@ -129,14 +130,25 @@ def eventos(desde: date, dias: int, buscar: str | None) -> int:
             errores.append(f"Google negó el acceso al calendario {cid}: {r.json().get('error', {}).get('message', '')}")
             continue
         r.raise_for_status()
-        for ev in r.json().get("items", []):
-            if ev.get("status") != "cancelled":
-                clave = ev["start"].get("dateTime") or ev["start"].get("date")
-                filas.append((clave, formatear(ev, cid, len(ids) > 1)))
+        filas += [(cid, ev) for ev in r.json().get("items", []) if ev.get("status") != "cancelled"]
+    filas.sort(key=lambda f: inicio(f[1]))
+    return filas, errores
+
+
+def inicio(ev: dict) -> datetime:
+    """Inicio del evento en hora local (los de todo el día, a medianoche)."""
+    if "date" in ev["start"]:
+        return datetime.combine(date.fromisoformat(ev["start"]["date"]), time.min).astimezone()
+    return datetime.fromisoformat(ev["start"]["dateTime"]).astimezone()
+
+
+def eventos(desde: date, dias: int, buscar: str | None) -> int:
+    filas, errores = listar(desde, dias, buscar)
+    varios = len(CFG.get("calendarios_google") or []) > 1
     fin = desde + timedelta(days=dias - 1)
     print(f"Eventos del {desde} al {fin}" + (f' que coinciden con "{buscar}"' if buscar else "") + ":")
-    for _, linea in sorted(filas):
-        print("- " + linea)
+    for cid, ev in filas:
+        print("- " + formatear(ev, cid, varios))
     if not filas:
         print("(ninguno)")
     for e in errores:

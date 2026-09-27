@@ -1,0 +1,13 @@
+edge-tts==7.2.8
+faster-whisper==1.2.1
+google-auth==2.58.1
+keyboard==0.13.5
+numpy==2.5.3
+pillow==12.3.0
+pycaw==20260927
+pystray==0.19.5
+pyttsx3==2.99
+pywebview==6.2.1
+requests==2.34.2
+sounddevice==0.5.6
+vosk==0.3.45

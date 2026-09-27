@@ -56,7 +56,7 @@ DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "doming
 FORMATO = """Responde SIEMPRE y SOLO con un objeto JSON válido (sin texto antes ni después, sin ```), con esta forma:
 {"voz": "...", "detalle": "...", "tarjetas": [...]}
 
-- voz: lo que se leerá en voz alta. Español natural y breve (1 a 3 frases). Sin markdown, sin URLs, sin rutas de archivos, sin emojis.
+- voz: lo que se leerá en voz alta. UNA frase directa de máximo unas 20 palabras (dos solo si de verdad hace falta). Empieza por la respuesta: sin preámbulos ("Claro", "Supongo que te refieres a..."), sin repetir la pregunta y sin cerrar ofreciendo más ayuda. Español natural, sin markdown, URLs, rutas de archivos ni emojis. Todo lo demás va en "detalle".
 - detalle: opcional. Información adicional para la pantalla; puede usar **negritas**, `código` y listas con "- ". Omítelo si "voz" basta.
 - tarjetas: de 0 a 4 apoyos visuales, solo cuando aporten algo. Tipos:
   {"tipo":"captura","url":"https://...","titulo":"..."}  captura de una página web (también sirve http://localhost:PUERTO para servicios locales)
@@ -393,6 +393,8 @@ class Motor:
             cuando = time.strptime(r["cuando"][:16], "%Y-%m-%dT%H:%M")
         nuevo = {"id": f"r{int(time.time() * 1000) % 100000}", "texto": r["texto"],
                  "cuando": time.strftime("%Y-%m-%dT%H:%M:%S", cuando)}
+        if r.get("temporizador"):
+            nuevo["temporizador"] = True
         self.recordatorios = sorted(self.recordatorios + [nuevo], key=lambda x: x["cuando"])
         guardar_recordatorios(self.recordatorios)
         log(f"Recordatorio programado: {nuevo['cuando']} {nuevo['texto']}")
@@ -419,7 +421,7 @@ class Motor:
             dia = "" if r["cuando"][:10] == time.strftime("%Y-%m-%d") else f"del {r['cuando'][:10]} "
             self.decir(f"Tenías un recordatorio {dia}para las {r['cuando'][11:16]}: {r['texto']}")
         else:
-            self.decir(f"Te recuerdo: {r['texto']}")
+            self.decir(r["texto"] if r.get("temporizador") else f"Te recuerdo: {r['texto']}")
 
     def nueva_conversacion(self) -> None:
         self.sesion["id"] = None
@@ -488,7 +490,7 @@ class Motor:
         self._tts.runAndWait()
 
     # --- escuchar ---
-    def grabar_pregunta(self, interrumpir=None) -> np.ndarray | None:
+    def grabar_pregunta(self, interrumpir=None, espera: float = 8) -> np.ndarray | None:
         ruido, frames = [], []
         hablo, silencio, inicio, ultimo_nivel = False, 0.0, time.time(), 0.0
         while True:
@@ -514,7 +516,7 @@ class Motor:
                 if silencio >= CFG["segundos_silencio_fin"]:
                     break
             transcurrido = time.time() - inicio
-            if not hablo and transcurrido > 8:
+            if not hablo and transcurrido > espera:
                 return None
             if transcurrido > CFG["segundos_max_pregunta"]:
                 break
@@ -524,7 +526,7 @@ class Motor:
     def transcribir(self, audio: np.ndarray) -> tuple[str, bool]:
         """Devuelve (texto, confiable). Poco confiable = Whisper dudó mucho."""
         segs, _ = self.whisper.transcribe(
-            audio, language="es", vad_filter=True, beam_size=5,
+            audio, language="es", vad_filter=True, beam_size=CFG.get("beam_whisper", 1),
             condition_on_previous_text=False, initial_prompt=self.vocabulario or None)
         segs = [s for s in segs if s.no_speech_prob < 0.6]
         texto = " ".join(s.text for s in segs).strip()
@@ -570,7 +572,7 @@ class Motor:
 
 Agenda: puedes leer el Google Calendar del usuario (solo lectura) ejecutando con Bash exactamente:
   {CALENDARIO} eventos --desde hoy|mañana|AAAA-MM-DD --dias N [--buscar "texto"]
-Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento).
+Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Si pregunta cuándo o dónde es algo suyo (un concierto, viaje, cita, partido, evento, "mi..."), busca PRIMERO en el calendario con --buscar y un rango amplio (--desde hoy --dias 366) antes de ir a la web. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento).
 Si el usuario pide AÑADIR un evento, cita, recordatorio o cumpleaños, no uses "tarea": añade al JSON
   "evento": {{"titulo": "...", "inicio": "AAAA-MM-DD" (todo el día) o "AAAA-MM-DDTHH:MM", "fin": opcional (mismo formato; por defecto 1 hora o 1 día), "repetir": opcional "diario"|"semanal"|"mensual"|"anual", "lugar": opcional, "descripcion": opcional, "recordatorio_min": opcional (minutos antes), "recordatorio": opcional true}}
 Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 de diciembre). Los cumpleaños y aniversarios son de todo el día y se repiten cada año; su título es "Cumpleaños de <nombre>". Si falta la hora de una cita, pregúntala en vez de inventarla. En "voz" repite qué vas a añadir y cuándo, y termina preguntando si lo confirmas; nunca digas que ya está añadido. No puedes mover ni borrar eventos: si te lo piden, dilo.
@@ -602,6 +604,10 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         cmd = [CLAUDE, "-p", pregunta, "--output-format", "stream-json", "--verbose",
                "--append-system-prompt", self.sistema(),
                "--allowedTools", self.herramientas()]
+        # sin servidores MCP ni ajustes de proyecto: arranca ~1.5 s más rápido
+        cmd += ["--strict-mcp-config", "--setting-sources", "user"]
+        if CFG.get("esfuerzo_pregunta"):
+            cmd += ["--effort", CFG["esfuerzo_pregunta"]]
         if CFG.get("modelo_pregunta"):
             cmd += ["--model", CFG["modelo_pregunta"]]
         if self.sesion["id"] and time.time() - self.sesion["ultima"] < CFG["minutos_contexto"] * 60:
@@ -693,23 +699,41 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
             guardar_en_historial(item)
 
         threading.Thread(target=al_terminar, daemon=True).start()
-        self.hablar(resp["voz"])
+        if resp["voz"]:
+            self.hablar(resp["voz"])
+        else:
+            emitir({"tipo": "estado", "estado": "reposo"})
 
-    def atender(self, texto: str) -> None:
+    def atender(self, texto: str) -> bool:
+        """Responde a una frase. Devuelve False si la conversación terminó
+        (entonces no se escucha un seguimiento)."""
         log(f"Tú: {texto}")
         emitir({"tipo": "pregunta", "texto": texto})
         t = texto.lower()
         if self.tareas_activas and CANCELAR_TAREA.search(t):
             n = self.cancelar_tarea()
             self.decir("Listo, cancelé la tarea." if n == 1 else f"Listo, cancelé {n} tareas.")
-            return
+            return True
         if re.fullmatch(r"\W*(cancela|olvídalo|nada)\W*", t):
             emitir({"tipo": "estado", "estado": "reposo"})
-            return
+            return False
         if re.search(r"\b(nueva conversación|empecemos de nuevo)\b", t):
             self.nueva_conversacion()
             self.decir("Listo, empezamos de nuevo.")
-            return
+            return True
+        try:
+            import acciones  # aquí y no arriba: acciones importa motor
+            rapido = acciones.atajo(texto, self)
+        except Exception as e:
+            log(f"Atajo local falló, pregunto a Claude: {e}")
+            rapido = None
+        if rapido is not None:
+            despues, seguir = rapido.pop("despues", None), not rapido.pop("terminar", False)
+            log(f"Asistente (local): {rapido['voz'] or rapido['detalle']}")
+            self.responder(texto, rapido)
+            if despues:
+                despues()
+            return seguir
         emitir({"tipo": "estado", "estado": "pensando"})
         resp = self.preguntar_a_claude(texto)
         tarea, evento = resp.pop("tarea", None), resp.pop("evento", None)
@@ -737,7 +761,7 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
             emitir({"tipo": "confirmar", "id": cid, "pregunta": pregunta})
         self.responder(texto, resp)
         if not (tarea or evento):
-            return
+            return True
         ok = self.pedir_confirmacion()
         emitir({"tipo": "confirmado", "id": cid, "valor": ok})
         log(f"{'Confirmado' if ok else 'Descartado'}: {pregunta}")
@@ -749,6 +773,28 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
             self.hablar("De acuerdo, empiezo. Te aviso cuando termine.")
         else:
             self.crear_evento(evento)
+        return True
+
+    def seguimiento(self) -> bool:
+        """Tras una respuesta hablada, escucha unos segundos sin palabra de activación.
+        Devuelve True si hubo otra pregunta (y ya se atendió)."""
+        segundos = CFG.get("segundos_seguimiento", 0)
+        if not segundos or self.silenciado:
+            return False
+        vaciar_cola()
+        emitir({"tipo": "estado", "estado": "seguimiento"})
+        audio = self.grabar_pregunta(espera=segundos)
+        texto = ""
+        if audio is not None:
+            emitir({"tipo": "estado", "estado": "transcribiendo"})
+            texto, confiable = self.transcribir(audio)
+            if texto and not confiable:
+                log(f"Seguimiento dudoso, ignorado: {texto}")  # suele ser ruido o la tele
+                texto = ""
+        if not texto:
+            emitir({"tipo": "estado", "estado": "reposo"})
+            return False
+        return self.atender(texto)
 
     def crear_evento(self, evento: dict) -> None:
         import calendario  # carga google-auth solo cuando hace falta
@@ -849,6 +895,8 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
                     log(f"Transcripción dudosa, descartada: {texto}")
                     emitir({"tipo": "pregunta", "texto": texto})
                     self.decir("No te entendí bien. ¿Me lo repites?")
-                else:
-                    self.atender(texto)
+                # tras "no te entendí" también se escucha: así basta con repetirlo
+                if not texto or not confiable or self.atender(texto):
+                    while self.seguimiento():
+                        pass
                 wake.Reset()

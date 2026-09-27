@@ -12,6 +12,7 @@ const ESTADOS = {
   pensando: "Pensando…",
   hablando: "Respondiendo",
   confirmando: "¿Lo hago? Di «sí» o «no»",
+  seguimiento: "¿Algo más? Te escucho…",
 };
 const ESTADOS_TAREA = { en_curso: "Trabajando", hecha: "Terminada", error: "Falló", cancelada: "Cancelada" };
 
