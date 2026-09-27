@@ -43,12 +43,18 @@ REPETIR = {"diario": "DAILY", "semanal": "WEEKLY", "mensual": "MONTHLY", "anual"
 def crear_evento(ev: dict) -> dict:
     """Crea un evento en el primer calendario configurado. `ev` viene de Claude:
     titulo, inicio ("AAAA-MM-DD" = todo el día, o "AAAA-MM-DDTHH:MM"), y opcionales
-    fin, repetir, lugar, descripcion, recordatorio_min. Devuelve el evento creado."""
+    fin, repetir, lugar, descripcion, recordatorio_min y recordatorio (true = aviso
+    rápido: 15 minutos, no ocupa el tiempo y suena a la hora exacta). Devuelve el evento creado."""
     cuerpo = {"summary": ev["titulo"]}
     if "T" in ev["inicio"]:
         a = datetime.fromisoformat(ev["inicio"]).astimezone()  # sin zona = hora local
-        b = datetime.fromisoformat(ev["fin"]).astimezone() if ev.get("fin") else a + timedelta(hours=1)
+        duracion = timedelta(minutes=15) if ev.get("recordatorio") else timedelta(hours=1)
+        b = datetime.fromisoformat(ev["fin"]).astimezone() if ev.get("fin") else a + duracion
         cuerpo["start"], cuerpo["end"] = {"dateTime": a.isoformat()}, {"dateTime": b.isoformat()}
+        if ev.get("recordatorio"):
+            cuerpo["transparency"] = "transparent"
+            if ev.get("recordatorio_min") is None:
+                ev = {**ev, "recordatorio_min": 0}
     else:  # todo el día: Google toma el fin como exclusivo
         a = date.fromisoformat(ev["inicio"])
         b = date.fromisoformat(ev["fin"][:10]) + timedelta(days=1) if ev.get("fin") else a + timedelta(days=1)

@@ -9,6 +9,7 @@ modelos/
 capturas/
 asistente.log
 historial.json
+recordatorios.json
 respuesta.mp3
 
 # credenciales de Google (nunca subir)

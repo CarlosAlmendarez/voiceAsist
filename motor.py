@@ -42,6 +42,7 @@ BLOCK = 1600  # 100 ms
 CAPTURAS = BASE / "capturas"
 HISTORIAL = BASE / "historial.json"
 MP3 = BASE / "respuesta.mp3"
+RECORDATORIOS = BASE / "recordatorios.json"  # avisos por voz pendientes en esta PC
 EDGE = next((p for p in [
     Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft/Edge/Application/msedge.exe",
     Path(os.environ.get("ProgramFiles", "")) / "Microsoft/Edge/Application/msedge.exe",
@@ -216,6 +217,17 @@ def guardar_en_historial(item: dict) -> None:
     HISTORIAL.write_text(json.dumps(h[-100:], ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def cargar_recordatorios() -> list:
+    try:
+        return json.loads(RECORDATORIOS.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def guardar_recordatorios(lista: list) -> None:
+    RECORDATORIOS.write_text(json.dumps(lista, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 def item_historial(indice: int) -> dict | None:
     h = cargar_historial()
     if not 0 <= indice < len(h):
@@ -269,20 +281,26 @@ def interpretar(texto: str) -> dict:
             evento = data.get("evento")
             if not (isinstance(evento, dict) and evento.get("titulo") and evento.get("inicio")):
                 evento = None
+            local = data.get("recordatorio_local")
+            if not (isinstance(local, dict) and local.get("texto") and (local.get("en_minutos") or local.get("cuando"))):
+                local = None
+            cancelar = [str(i) for i in data.get("cancelar_recordatorios") or [] if i]
             return {"voz": str(data["voz"]), "detalle": str(data.get("detalle") or ""),
-                    "tarjetas": tarjetas[:4], "tarea": tarea, "evento": evento}
+                    "tarjetas": tarjetas[:4], "tarea": tarea, "evento": evento,
+                    "recordatorio_local": local, "cancelar_recordatorios": cancelar}
     except (json.JSONDecodeError, ValueError):
         pass
     # respuesta sin formato: la primera parte se lee, el resto se muestra
     frases = re.split(r"(?<=[.!?])\s+", texto.strip())
     return {"voz": " ".join(frases[:2]), "detalle": " ".join(frases[2:]), "tarjetas": [],
-            "tarea": None, "evento": None}
+            "tarea": None, "evento": None, "recordatorio_local": None, "cancelar_recordatorios": []}
 
 
 def describir_evento(ev: dict) -> str:
     cuando = ev["inicio"].replace("T", " ") + (f" → {ev['fin'].replace('T', ' ')}" if ev.get("fin") else "")
     repetir = {"diario": "cada día", "semanal": "cada semana", "mensual": "cada mes", "anual": "cada año"}
-    extras = [x for x in (repetir.get(ev.get("repetir") or ""), ev.get("lugar")) if x]
+    extras = [x for x in ("recordatorio" if ev.get("recordatorio") else "",
+                          repetir.get(ev.get("repetir") or ""), ev.get("lugar")) if x]
     return f"{ev['titulo']} — {cuando}" + (f" ({', '.join(extras)})" if extras else "")
 
 
@@ -336,6 +354,7 @@ class Motor:
         self.tareas = ThreadPoolExecutor(max_workers=2)
         self.tareas_activas: dict[str, dict] = {}
         self.proyectos: dict[str, str] = {}
+        self.recordatorios: list[dict] = cargar_recordatorios()
         self.whisper = None
         self.vocabulario = ""
         self._tts = None
@@ -365,6 +384,42 @@ class Motor:
                     t["proc"].kill()
                 n += 1
         return n
+
+    # --- recordatorios por voz ---
+    def programar_recordatorio(self, r: dict) -> None:
+        if r.get("en_minutos"):
+            cuando = time.localtime(time.time() + float(r["en_minutos"]) * 60)
+        else:
+            cuando = time.strptime(r["cuando"][:16], "%Y-%m-%dT%H:%M")
+        nuevo = {"id": f"r{int(time.time() * 1000) % 100000}", "texto": r["texto"],
+                 "cuando": time.strftime("%Y-%m-%dT%H:%M:%S", cuando)}
+        self.recordatorios = sorted(self.recordatorios + [nuevo], key=lambda x: x["cuando"])
+        guardar_recordatorios(self.recordatorios)
+        log(f"Recordatorio programado: {nuevo['cuando']} {nuevo['texto']}")
+
+    def cancelar_recordatorios(self, ids: list[str]) -> None:
+        self.recordatorios = [r for r in self.recordatorios if r["id"] not in ids]
+        guardar_recordatorios(self.recordatorios)
+        log(f"Recordatorios cancelados: {', '.join(ids)}")
+
+    def recordatorio_vencido(self) -> dict | None:
+        ahora = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if self.recordatorios and self.recordatorios[0]["cuando"] <= ahora:
+            r = self.recordatorios.pop(0)
+            guardar_recordatorios(self.recordatorios)
+            return r
+        return None
+
+    def recordar(self, r: dict) -> None:
+        atraso = time.time() - time.mktime(time.strptime(r["cuando"], "%Y-%m-%dT%H:%M:%S"))
+        emitir({"tipo": "aviso", "texto": f"Recordatorio: {r['texto']}"})
+        for f in (1175, 1397, 1175):
+            winsound.Beep(f, 140)
+        if atraso > 120:  # la PC estaba apagada o el asistente cerrado a esa hora
+            dia = "" if r["cuando"][:10] == time.strftime("%Y-%m-%d") else f"del {r['cuando'][:10]} "
+            self.decir(f"Tenías un recordatorio {dia}para las {r['cuando'][11:16]}: {r['texto']}")
+        else:
+            self.decir(f"Te recuerdo: {r['texto']}")
 
     def nueva_conversacion(self) -> None:
         self.sesion["id"] = None
@@ -517,8 +572,20 @@ Agenda: puedes leer el Google Calendar del usuario (solo lectura) ejecutando con
   {CALENDARIO} eventos --desde hoy|mañana|AAAA-MM-DD --dias N [--buscar "texto"]
 Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento).
 Si el usuario pide AÑADIR un evento, cita, recordatorio o cumpleaños, no uses "tarea": añade al JSON
-  "evento": {{"titulo": "...", "inicio": "AAAA-MM-DD" (todo el día) o "AAAA-MM-DDTHH:MM", "fin": opcional (mismo formato; por defecto 1 hora o 1 día), "repetir": opcional "diario"|"semanal"|"mensual"|"anual", "lugar": opcional, "descripcion": opcional, "recordatorio_min": opcional (minutos antes)}}
-Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 de diciembre). Los cumpleaños y aniversarios son de todo el día y se repiten cada año; su título es "Cumpleaños de <nombre>". Si falta la hora de una cita, pregúntala en vez de inventarla. En "voz" repite qué vas a añadir y cuándo, y termina preguntando si lo confirmas; nunca digas que ya está añadido. No puedes mover ni borrar eventos: si te lo piden, dilo."""
+  "evento": {{"titulo": "...", "inicio": "AAAA-MM-DD" (todo el día) o "AAAA-MM-DDTHH:MM", "fin": opcional (mismo formato; por defecto 1 hora o 1 día), "repetir": opcional "diario"|"semanal"|"mensual"|"anual", "lugar": opcional, "descripcion": opcional, "recordatorio_min": opcional (minutos antes), "recordatorio": opcional true}}
+Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 de diciembre). Los cumpleaños y aniversarios son de todo el día y se repiten cada año; su título es "Cumpleaños de <nombre>". Si falta la hora de una cita, pregúntala en vez de inventarla. En "voz" repite qué vas a añadir y cuándo, y termina preguntando si lo confirmas; nunca digas que ya está añadido. No puedes mover ni borrar eventos: si te lo piden, dilo.
+Un "recuérdame X" para otro día, para dentro de más de 12 horas, o cuando mencione el calendario o el celular, es un evento con "recordatorio": true (titulo = lo que hay que recordar, inicio con fecha y hora): dura 15 minutos, no ocupa el tiempo y avisa justo a esa hora en su celular. Si no dice la hora, pregúntala."""
+        texto += """
+
+Recordatorios por voz en esta PC: si pide que le recuerdes algo dentro de poco ("en 20 minutos", "en una hora", "a las seis" de hoy), añade al JSON
+  "recordatorio_local": {"texto": "lo que hay que recordar, breve", "en_minutos": N}   o   {"texto": "...", "cuando": "AAAA-MM-DDTHH:MM"}
+El asistente lo dirá en voz alta a esa hora (solo si la PC está encendida). No hace falta confirmación: en "voz" di cuándo avisarás ("Vale, te aviso a las seis y cuarto")."""
+        if self.recordatorios:
+            lista = "\n".join(f"- id {r['id']}: {r['cuando'].replace('T', ' ')} {r['texto']}" for r in self.recordatorios)
+            texto += f"""
+Recordatorios pendientes en esta PC:
+{lista}
+Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo en "voz"."""
         if self.proyectos:
             lista = "\n".join(f"- {n}: {p}" for n, p in sorted(self.proyectos.items()))
             texto += f"\n\nProyectos conocidos del usuario (nombre: carpeta):\n{lista}"
@@ -646,7 +713,16 @@ Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 d
         emitir({"tipo": "estado", "estado": "pensando"})
         resp = self.preguntar_a_claude(texto)
         tarea, evento = resp.pop("tarea", None), resp.pop("evento", None)
+        local, cancelar = resp.pop("recordatorio_local", None), resp.pop("cancelar_recordatorios", [])
         log(f"Asistente: {resp['voz']}")
+        if cancelar:
+            self.cancelar_recordatorios(cancelar)
+        if local:
+            try:
+                self.programar_recordatorio(local)
+            except (ValueError, TypeError) as e:
+                log(f"Recordatorio no válido {local}: {e}")
+                resp["voz"] = "Perdona, no pude programar ese recordatorio. ¿Me dices otra vez cuándo?"
         if tarea:
             propuesta = f"**Tarea propuesta:** {tarea['descripcion']}\n`{tarea.get('carpeta', '')}`\n{tarea['plan']}"
             pregunta = f"¿Ejecuto «{tarea['descripcion']}»?"
@@ -722,6 +798,11 @@ Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 d
                     continue
                 except queue.Empty:
                     pass
+                vencido = self.recordatorio_vencido()
+                if vencido:
+                    self.recordar(vencido)
+                    wake.Reset()
+                    continue
                 try:
                     self.atender(self.textos.get_nowait())
                     wake.Reset()
