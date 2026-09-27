@@ -10,3 +10,8 @@ capturas/
 asistente.log
 historial.json
 respuesta.mp3
+
+# credenciales de Google (nunca subir)
+kys/
+token*.json
+config.local.json

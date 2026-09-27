@@ -24,6 +24,8 @@ from urllib.parse import urlparse
 
 BASE = Path(__file__).parent
 CFG = json.loads((BASE / "config.json").read_text(encoding="utf-8"))
+if (BASE / "config.local.json").exists():  # datos personales, fuera de git
+    CFG.update(json.loads((BASE / "config.local.json").read_text(encoding="utf-8")))
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 if (BASE / "modelos" / f"models--Systran--faster-whisper-{CFG['modelo_whisper']}").exists():
@@ -46,6 +48,9 @@ EDGE = next((p for p in [
 ] if p.exists()), None)
 CLAUDE = shutil.which("claude") or str(Path.home() / ".local/bin/claude.exe")
 SIN_VENTANA = 0x08000000  # CREATE_NO_WINDOW
+# comando que Claude ejecuta para leer Google Calendar (python.exe, no pythonw, para que imprima)
+CALENDARIO = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE / 'calendario.py').as_posix()}"
+DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 FORMATO = """Responde SIEMPRE y SOLO con un objeto JSON válido (sin texto antes ni después, sin ```), con esta forma:
 {"voz": "...", "detalle": "...", "tarjetas": [...]}
@@ -237,6 +242,8 @@ def describir_herramienta(nombre: str, e: dict) -> str:
     if nombre == "WebFetch":
         return f"Consultando {urlparse(e.get('url', '')).netloc or 'una página'}"
     if nombre in ("Bash", "PowerShell"):
+        if "calendario.py" in e.get("command", ""):
+            return "Revisando tu calendario"
         return f"Ejecutando {e.get('command', '')[:50]}"
     if nombre in ("Edit", "MultiEdit", "NotebookEdit"):
         return f"Editando {Path(e.get('file_path') or e.get('notebook_path') or '').name}"
@@ -490,10 +497,22 @@ class Motor:
 
     # --- Claude ---
     def sistema(self) -> str:
-        if not self.proyectos:
-            return SISTEMA
-        lista = "\n".join(f"- {n}: {p}" for n, p in sorted(self.proyectos.items()))
-        return f"{SISTEMA}\n\nProyectos conocidos del usuario (nombre: carpeta):\n{lista}"
+        hoy = time.localtime()
+        texto = f"{SISTEMA}\n\nAhora es {DIAS[hoy.tm_wday]} {time.strftime('%Y-%m-%d %H:%M', hoy)}."
+        if CFG.get("calendarios_google"):
+            texto += f"""
+
+Agenda: puedes leer el Google Calendar del usuario (solo lectura) ejecutando con Bash exactamente:
+  {CALENDARIO} eventos --desde hoy|mañana|AAAA-MM-DD --dias N [--buscar "texto"]
+Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento). No puedes crear, mover ni borrar eventos: si te lo piden, dilo."""
+        if self.proyectos:
+            lista = "\n".join(f"- {n}: {p}" for n, p in sorted(self.proyectos.items()))
+            texto += f"\n\nProyectos conocidos del usuario (nombre: carpeta):\n{lista}"
+        return texto
+
+    def herramientas(self) -> str:
+        h = CFG["herramientas_permitidas"]
+        return f"{h},Bash({CALENDARIO} eventos:*)" if CFG.get("calendarios_google") else h
 
     def preguntar_a_claude(self, pregunta: str) -> dict:
         if self.nota_contexto:
@@ -501,7 +520,7 @@ class Motor:
             self.nota_contexto = ""
         cmd = [CLAUDE, "-p", pregunta, "--output-format", "stream-json", "--verbose",
                "--append-system-prompt", self.sistema(),
-               "--allowedTools", CFG["herramientas_permitidas"]]
+               "--allowedTools", self.herramientas()]
         if CFG.get("modelo_pregunta"):
             cmd += ["--model", CFG["modelo_pregunta"]]
         if self.sesion["id"] and time.time() - self.sesion["ultima"] < CFG["minutos_contexto"] * 60:

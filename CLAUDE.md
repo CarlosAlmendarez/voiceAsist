@@ -33,6 +33,8 @@ Two Python modules plus a static web UI:
 
 - **`asistente.py`** — the shell: creates the frameless, always-on-top pywebview window, the system tray icon (pystray), the global hotkey (`keyboard`), and the "start with Windows" shortcut. Switches between `orbe` and `panel` modes by resizing/moving the window and clipping it with Win32 regions (ctypes). Note the DPI handling: pywebview uses logical pixels while `webview.screens` and Win32 regions use physical ones (`escala()`).
 
+- **`calendario.py`** — read-only Google Calendar CLI (`eventos --desde hoy|mañana|AAAA-MM-DD --dias N [--buscar texto]`) using a service account (`google-auth`, `calendar.readonly`). Claude calls it through Bash in question mode: `Motor.sistema()` documents the exact command (`motor.CALENDARIO`, forward-slash paths) and `Motor.herramientas()` adds a matching `Bash(<command> eventos:*)` allow rule, only when `calendarios_google` is configured. The service account only sees calendars the user shared with its `client_email`; 403/404 prints an `AVISO` line. Test directly: `.venv\Scripts\python.exe calendario.py eventos --dias 7`.
+
 - **`ui/`** (`index.html`, `app.js`, `app.css`, vendored highlight.js) — plain JS, no framework or bundler.
 
 ### Python ↔ UI bridge
@@ -42,7 +44,7 @@ Two Python modules plus a static web UI:
 
 ## Configuration
 
-`config.json` is read once at import (`motor.CFG`); restart after changes. Notable keys: `palabra_activacion`, `confianza_minima`, `carpeta_proyectos` (Claude's working directory for questions and root for project discovery), `herramientas_permitidas` (question mode — keep read-only; edits must go through the confirmed task flow), `vocabulario`, the `*_tarea` keys, `motor_voz`, `atajo`.
+`config.json` is read once at import (`motor.CFG`) and overlaid with the git-ignored `config.local.json` (personal data: `credenciales_google`, `calendarios_google`); restart after changes. Credentials live in the git-ignored `kys/`. Notable keys: `palabra_activacion`, `confianza_minima`, `carpeta_proyectos` (Claude's working directory for questions and root for project discovery), `herramientas_permitidas` (question mode — keep read-only; edits must go through the confirmed task flow), `vocabulario`, the `*_tarea` keys, `motor_voz`, `atajo`.
 
 ## Generated / runtime files
 
