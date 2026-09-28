@@ -39,6 +39,8 @@ Two Python modules plus a static web UI:
 
 - **Local voice reminders** — for short-term "recuérdame en 20 minutos", Claude returns `recordatorio_local: {texto, en_minutos | cuando}` (no confirmation) or `cancelar_recordatorios: [ids]`; pending ones are listed in the system prompt with their ids. Stored in git-ignored `recordatorios.json`, fired by the main loop when idle (`recordatorio_vencido()` / `recordar()`); ones missed while the PC was off are announced as late on next start.
 
+- **`remoto.py` + `ui-remoto/`** — phone access over Tailscale. A threaded bottle/wsgiref server on `127.0.0.1:puerto_remoto` (started from `Motor.ejecutar()` once Whisper is loaded, only if `clave_remota` is set in `config.local.json`), published inside the tailnet with `tailscale serve --bg --https=8443 8765` (port 443 on this PC's Tailscale IP is taken by a Docker container). Every request needs the key (`X-Clave` header or the HttpOnly cookie set by `/?clave=...`). API: `/api/preguntar` (JSON texto), `/api/audio` (raw recording → Whisper), `/api/confirmar`, `/api/novedades?desde=n` (poll), `/api/voz?t=` (edge-tts MP3). `Motor.atender_remoto()` mirrors `_atender()` but returns the response instead of speaking; confirmations are two-step via `pendiente_remoto`; progress, resolved cards, finished tasks and fired reminders go to the `Motor.buzon` the page polls. `Motor.bloqueo` (RLock) serializes PC and phone conversations; `bloqueo_whisper` guards the model. In remote mode Claude is told not to use `recordatorio_local`, and `acciones.reproducir` returns a link (`abrir`) instead of opening the PC browser.
+
 - **`ui/`** (`index.html`, `app.js`, `app.css`, vendored highlight.js) — plain JS, no framework or bundler.
 
 ### Python ↔ UI bridge

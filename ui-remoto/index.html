@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Asistente">
+<meta name="theme-color" content="#0b0e14">
+<title>Asistente</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icono.png">
+<link rel="stylesheet" href="remoto.css">
+</head>
+<body data-estado="reposo">
+  <header>
+    <div class="orb"><i></i></div>
+    <div class="titulo"><strong>Asistente</strong><span id="estado">Listo</span></div>
+    <button id="btn-voz" class="icono" title="Leer respuestas en voz alta" aria-pressed="true">
+      <svg class="on" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12"/></svg>
+      <svg class="off" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 9l5 6M22 9l-5 6"/></svg>
+    </button>
+  </header>
+
+  <main id="conversacion">
+    <div id="bienvenida">
+      <div class="orb grande"><i></i></div>
+      <h1>¿En qué te ayudo?</h1>
+      <p>Mantén pulsado el botón y habla, o tócalo una vez para empezar y otra para terminar. También puedes escribir.</p>
+    </div>
+  </main>
+
+  <footer>
+    <form id="form">
+      <input id="entrada" autocomplete="off" enterkeyhint="send" placeholder="Escribe una pregunta…">
+      <button class="icono" title="Enviar"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </form>
+    <button id="hablar" title="Hablar">
+      <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+  </footer>
+
+  <audio id="audio" playsinline></audio>
+  <script src="remoto.js"></script>
+</body>
+</html>

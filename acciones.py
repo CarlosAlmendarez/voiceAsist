@@ -168,14 +168,19 @@ def buscar_youtube(consulta: str, ultimo_episodio: bool) -> tuple[dict | None, s
     return (videos[0] if videos else None), ""
 
 
-def reproducir(consulta: str, ultimo_episodio: bool) -> dict:
+def reproducir(consulta: str, ultimo_episodio: bool, remoto: bool = False) -> dict:
     import webbrowser
     video, canal = buscar_youtube(consulta, ultimo_episodio)
     if not video:
         return resp(f"No encontré {consulta} en YouTube Music.")
     url = f"https://music.youtube.com/watch?v={video['id']}"
+    nombre = f"el último episodio de {canal}" if canal else consulta.title()
+    if remoto:  # desde el iPhone: se abre en el teléfono, no en la PC
+        return resp(f"Aquí tienes {nombre}; tócalo para escucharlo.", f"**{video.get('title', '')}**",
+                    tarjetas=[{"tipo": "fuentes", "enlaces": [{"titulo": video.get("title", consulta), "url": url}]}],
+                    abrir=url)
     webbrowser.open(url)
-    voz = f"Poniendo el último episodio de {canal}." if canal else f"Poniendo {consulta.title()}."
+    voz = f"Poniendo {nombre}."
     return resp(voz, f"**{video.get('title', '')}**", terminar=True,
                 tarjetas=[{"tipo": "fuentes", "enlaces": [{"titulo": video.get("title", consulta), "url": url}]}])
 
@@ -285,7 +290,7 @@ def tabla_agenda(filas: list, titulo: str) -> list:
 
 
 # ---------- reconocimiento de frases ----------
-def atajo(texto: str, motor) -> dict | None:
+def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
     t = normalizar(texto)
     if len(t.split()) > 12:
         return None
@@ -347,12 +352,12 @@ def atajo(texto: str, motor) -> dict | None:
                       r"( mas reciente| nuevo)? de( el podcast)? (.+)", t)
          or re.fullmatch(r"(pon|ponme|reproduce|quiero escuchar)( el| un)? podcast( de)? (.+)", t))
     if m:
-        return reproducir(m.group(m.lastindex), ultimo_episodio=True)
+        return reproducir(m.group(m.lastindex), ultimo_episodio=True, remoto=remoto)
     m = (re.fullmatch(r"(pon|ponme|reproduce|quiero escuchar)( la| el| un poco de| algo de)? "
                       r"(musica|cancion|canciones|album|disco)( de)? (.+)", t)
          or re.fullmatch(r"(reproduce|quiero escuchar) (.+)", t))
     if m:
-        return reproducir(m.group(m.lastindex), ultimo_episodio=False)
+        return reproducir(m.group(m.lastindex), ultimo_episodio=False, remoto=remoto)
     if re.fullmatch(r"(pon|ponme|abre) (musica|un podcast|podcasts|youtube music)", t):
         import webbrowser
         webbrowser.open(SITIOS["podcasts" if "podcast" in t else "youtube music"])

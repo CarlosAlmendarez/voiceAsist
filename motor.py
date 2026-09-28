@@ -358,6 +358,11 @@ class Motor:
         self.whisper = None
         self.vocabulario = ""
         self._tts = None
+        self.bloqueo = threading.RLock()  # una conversación a la vez (PC o iPhone)
+        self.bloqueo_whisper = threading.Lock()
+        self.buzon: list[dict] = []  # novedades para el iPhone (tareas, recordatorios, tarjetas)
+        self.n_buzon = 0
+        self.pendiente_remoto: dict | None = None  # tarea o evento esperando un sí desde el iPhone
 
     # --- control desde la interfaz ---
     def silenciar(self, valor: bool) -> None:
@@ -413,6 +418,9 @@ class Motor:
         return None
 
     def recordar(self, r: dict) -> None:
+        self.publicar({"tipo": "aviso", "texto": f"Recordatorio: {r['texto']}",
+                       "voz": r["texto"] if r.get("temporizador") else f"Te recuerdo: {r['texto']}",
+                       "detalle": "", "tarjetas": []})
         atraso = time.time() - time.mktime(time.strptime(r["cuando"], "%Y-%m-%dT%H:%M:%S"))
         emitir({"tipo": "aviso", "texto": f"Recordatorio: {r['texto']}"})
         for f in (1175, 1397, 1175):
@@ -525,10 +533,11 @@ class Motor:
 
     def transcribir(self, audio: np.ndarray) -> tuple[str, bool]:
         """Devuelve (texto, confiable). Poco confiable = Whisper dudó mucho."""
-        segs, _ = self.whisper.transcribe(
-            audio, language="es", vad_filter=True, beam_size=CFG.get("beam_whisper", 1),
-            condition_on_previous_text=False, initial_prompt=self.vocabulario or None)
-        segs = [s for s in segs if s.no_speech_prob < 0.6]
+        with self.bloqueo_whisper:
+            segs, _ = self.whisper.transcribe(
+                audio, language="es", vad_filter=True, beam_size=CFG.get("beam_whisper", 1),
+                condition_on_previous_text=False, initial_prompt=self.vocabulario or None)
+            segs = [s for s in segs if s.no_speech_prob < 0.6]
         texto = " ".join(s.text for s in segs).strip()
         if not texto:
             return "", True
@@ -597,7 +606,13 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         h = CFG["herramientas_permitidas"]
         return f"{h},Bash({CALENDARIO} eventos:*)" if CFG.get("calendarios_google") else h
 
-    def preguntar_a_claude(self, pregunta: str) -> dict:
+    def preguntar_a_claude(self, pregunta: str, remoto: bool = False) -> dict:
+        progreso = (lambda t: self.publicar({"tipo": "progreso", "texto": t})) if remoto \
+            else (lambda t: emitir({"tipo": "progreso", "texto": t}))
+        if remoto:
+            pregunta = ("[El usuario te habla desde su iPhone, lejos de la PC: no uses recordatorio_local "
+                        "(para recordatorios usa un evento con \"recordatorio\": true). Lo que hagas en la PC "
+                        "(volumen, abrir apps) no afecta al teléfono.]\n\n" + pregunta)
         if self.nota_contexto:
             pregunta = f"{self.nota_contexto}\n\n{pregunta}"
             self.nota_contexto = ""
@@ -612,9 +627,8 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
             cmd += ["--model", CFG["modelo_pregunta"]]
         if self.sesion["id"] and time.time() - self.sesion["ultima"] < CFG["minutos_contexto"] * 60:
             cmd += ["--resume", self.sesion["id"]]
-        emitir({"tipo": "progreso", "texto": "Pensando…"})
-        resultado = correr_claude(cmd, CFG["carpeta_proyectos"], 300,
-                                  lambda t: emitir({"tipo": "progreso", "texto": t}))
+        progreso("Pensando…")
+        resultado = correr_claude(cmd, CFG["carpeta_proyectos"], 300, progreso)
         if not resultado:
             return {"voz": "Hubo un error al consultar a Claude. Revisa el registro.",
                     "detalle": "", "tarjetas": [], "tarea": None}
@@ -669,6 +683,8 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
                               f"Resultado: {resp['voz']} {resp['detalle']}]")
         emitir({"tipo": "tarea", "id": tid, "estado": estado})
         self.avisos.put({"descripcion": desc, "estado": estado, **resp})
+        self.publicar({"tipo": "aviso", "texto": ("Tarea terminada: " if estado == "hecha" else "Tarea fallida: ") + desc,
+                       "voz": resp["voz"], "detalle": resp["detalle"], "tarjetas": resp["tarjetas"]})
 
     def anunciar(self, aviso: dict) -> None:
         emitir({"tipo": "aviso", "texto": ("Tarea terminada: " if aviso["estado"] == "hecha"
@@ -707,6 +723,10 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
     def atender(self, texto: str) -> bool:
         """Responde a una frase. Devuelve False si la conversación terminó
         (entonces no se escucha un seguimiento)."""
+        with self.bloqueo:
+            return self._atender(texto)
+
+    def _atender(self, texto: str) -> bool:
         log(f"Tú: {texto}")
         emitir({"tipo": "pregunta", "texto": texto})
         t = texto.lower()
@@ -797,23 +817,118 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         return self.atender(texto)
 
     def crear_evento(self, evento: dict) -> None:
+        r = self._crear_evento(evento)
+        emitir({"tipo": "respuesta", **r})
+        self.hablar(r["voz"])
+
+    def _crear_evento(self, evento: dict) -> dict:
         import calendario  # carga google-auth solo cuando hace falta
         try:
             creado = calendario.crear_evento(evento)
         except PermissionError as e:
             log(f"Calendario sin permiso de escritura: {e}")
-            self.decir("No tengo permiso para añadir eventos. En Google Calendar, cambia el permiso de la "
-                       "cuenta del asistente a «Hacer cambios en los eventos».")
-            return
+            return {"voz": "No tengo permiso para añadir eventos. En Google Calendar, cambia el permiso de la "
+                           "cuenta del asistente a «Hacer cambios en los eventos».", "detalle": "", "tarjetas": []}
         except Exception as e:
             log(f"No se pudo crear el evento: {e}")
-            self.decir("No pude crear el evento. Revisa el registro.")
-            return
+            return {"voz": "No pude crear el evento. Revisa el registro.", "detalle": "", "tarjetas": []}
         log(f"Evento creado: {describir_evento(evento)} ({creado.get('htmlLink')})")
-        emitir({"tipo": "respuesta", "voz": "Listo, ya está en tu calendario.", "detalle": "",
+        return {"voz": "Listo, ya está en tu calendario.", "detalle": "",
                 "tarjetas": [{"tipo": "fuentes", "enlaces": [
-                    {"titulo": f"Ver «{evento['titulo']}» en Google Calendar", "url": creado.get("htmlLink", "")}]}]})
-        self.hablar("Listo, ya está en tu calendario.")
+                    {"titulo": f"Ver «{evento['titulo']}» en Google Calendar", "url": creado.get("htmlLink", "")}]}]}
+
+    # --- acceso desde el iPhone (remoto.py) ---
+    def publicar(self, evento: dict) -> None:
+        self.n_buzon += 1
+        self.buzon = (self.buzon + [{"n": self.n_buzon, **evento}])[-100:]
+
+    def novedades(self, desde: int) -> dict:
+        return {"n": self.n_buzon, "eventos": [e for e in self.buzon if e["n"] > desde]}
+
+    def atender_remoto(self, texto: str) -> dict:
+        """Como atender(), pero devuelve la respuesta en vez de hablarla en la PC. Las
+        confirmaciones llegan después por confirmar_remoto() o con un «sí» escrito o dicho."""
+        with self.bloqueo:
+            log(f"Tú (iPhone): {texto}")
+            t = texto.lower()
+            if self.pendiente_remoto:
+                v = es_si_o_no(texto)
+                if v is not None:
+                    return self.confirmar_remoto(v)
+                self.pendiente_remoto = None  # cambió de tema: se descarta lo pendiente
+            if self.tareas_activas and CANCELAR_TAREA.search(t):
+                n = self.cancelar_tarea()
+                return {"voz": "Listo, cancelé la tarea." if n == 1 else f"Listo, cancelé {n} tareas.",
+                        "detalle": "", "tarjetas": []}
+            if re.search(r"\b(nueva conversación|empecemos de nuevo)\b", t):
+                self.sesion["id"] = None
+                self.nota_contexto = ""
+                return {"voz": "Listo, empezamos de nuevo.", "detalle": "", "tarjetas": [], "limpiar": True}
+            try:
+                import acciones
+                rapido = acciones.atajo(texto, self, remoto=True)
+            except Exception as e:
+                log(f"Atajo local falló, pregunto a Claude: {e}")
+                rapido = None
+            if rapido is not None:
+                despues = rapido.pop("despues", None)
+                rapido.pop("terminar", None)
+                if despues:
+                    despues()
+                log(f"Asistente (local, iPhone): {rapido['voz'] or rapido['detalle']}")
+                return rapido
+            resp = self.preguntar_a_claude(texto, remoto=True)
+            tarea, evento = resp.pop("tarea", None), resp.pop("evento", None)
+            resp.pop("recordatorio_local", None)
+            cancelar = resp.pop("cancelar_recordatorios", [])
+            if cancelar:
+                self.cancelar_recordatorios(cancelar)
+            log(f"Asistente (iPhone): {resp['voz']}")
+            if tarea or evento:
+                cid = f"k{int(time.time() * 1000)}"
+                if tarea:
+                    tarea["id"] = cid
+                    propuesta = f"**Tarea propuesta:** {tarea['descripcion']}\n`{tarea.get('carpeta', '')}`\n{tarea['plan']}"
+                    pregunta = f"¿Ejecuto «{tarea['descripcion']}»?"
+                else:
+                    propuesta = f"**Evento propuesto:** {describir_evento(evento)}"
+                    pregunta = f"¿Añado «{evento['titulo']}» a tu calendario?"
+                resp["detalle"] = (resp["detalle"] + "\n\n" if resp["detalle"] else "") + propuesta
+                self.pendiente_remoto = {"id": cid, "tarea": tarea, "evento": evento, "pregunta": pregunta}
+                resp["confirmar"] = {"id": cid, "pregunta": pregunta}
+            # capturas y estados se resuelven aparte y llegan como novedades
+            for i, tj in enumerate(resp["tarjetas"]):
+                tj["id"] = f"t{int(time.time() * 1000)}-{i}"
+                tj["pendiente"] = tj["tipo"] in ("captura", "estado")
+            item = {"fecha": time.strftime("%Y-%m-%d %H:%M"), "pregunta": texto,
+                    **{k: v for k, v in resp.items() if k != "confirmar"}}
+            pendientes = [(tj, self.tareas.submit(resolver_tarjeta, tj)) for tj in resp["tarjetas"] if tj["pendiente"]]
+
+            def al_terminar():
+                for tj, fut in pendientes:
+                    try:
+                        self.publicar({"tipo": "tarjeta", "tarjeta": fut.result()})
+                    except Exception as e:
+                        tj.update(pendiente=False, error=str(e))
+                        self.publicar({"tipo": "tarjeta", "tarjeta": tj})
+                guardar_en_historial(item)
+
+            threading.Thread(target=al_terminar, daemon=True).start()
+            return resp
+
+    def confirmar_remoto(self, valor: bool) -> dict:
+        with self.bloqueo:
+            p, self.pendiente_remoto = self.pendiente_remoto, None
+            if not p:
+                return {"voz": "No hay nada pendiente de confirmar.", "detalle": "", "tarjetas": []}
+            log(f"{'Confirmado' if valor else 'Descartado'} desde el iPhone: {p['pregunta']}")
+            base = {"confirmado": {"id": p["id"], "valor": valor}}
+            if not valor:
+                return {"voz": "Vale, no hago nada.", "detalle": "", "tarjetas": [], **base}
+            if p["tarea"]:
+                self.lanzar_tarea(p["tarea"])
+                return {"voz": "De acuerdo, empiezo. Te aviso cuando termine.", "detalle": "", "tarjetas": [], **base}
+            return {**self._crear_evento(p["evento"]), **base}
 
     # --- bucle principal ---
     def ejecutar(self) -> None:
@@ -832,6 +947,9 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         wake.SetWords(True)
         self.whisper = WhisperModel(CFG["modelo_whisper"], device="cpu", compute_type="int8",
                                     download_root=str(BASE / "modelos"))
+        if CFG.get("clave_remota"):
+            import remoto
+            remoto.iniciar(self)
 
         with sd.RawInputStream(samplerate=RATE, blocksize=BLOCK, dtype="int16",
                                channels=1, callback=on_audio):

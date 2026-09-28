@@ -40,5 +40,6 @@
   "segundos_silencio_fin": 1.2,
   "beam_whisper": 1,
   "segundos_seguimiento": 5,
-  "esfuerzo_pregunta": "low"
+  "esfuerzo_pregunta": "low",
+  "puerto_remoto": 8765
 }
