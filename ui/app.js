@@ -426,7 +426,7 @@ function pintarServicios() {
   sec.hidden = !s?.configurado;
   if (sec.hidden) return;
   const activas = s.alertas || [];
-  const criticas = activas.filter(a => a.severidad === "critico");
+  const criticas = activas.filter(a => a.severidad === "critico" && !a.reconocida);  // rojo solo sin «Visto»
   const n = activas.length;
   let texto, nivel;
   if (s.total == null) {

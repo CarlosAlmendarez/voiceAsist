@@ -321,10 +321,11 @@ def servicios() -> dict:
                                 "columnas": ["Servicio", "Estado", "Desde", "Detalle"], "filas": filas}])
 
 
-def novedades_servicios(desde: datetime | None) -> tuple[str, list]:
-    """Una frase (o "") con las caídas que EMPEZARON desde `desde`, y su tabla."""
+def novedades_servicios(desde: datetime | None, vigia_caido: bool = False) -> tuple[str, list]:
+    """Una frase (o "") con las caídas que EMPEZARON desde `desde`, y su tabla.
+    Con `vigia_caido` (el hilo de alertas ya sabe que no responde) no se espera el timeout."""
     import vigia
-    if not desde or not vigia.configurado():
+    if not desde or not vigia.configurado() or vigia_caido:
         return "", []
     try:
         r = vigia.incidentes(desde, datetime.now().replace(microsecond=0))
@@ -449,7 +450,8 @@ def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
             log(f"Clima no disponible: {e}")
             voz_clima = ""
         # actividad_previa = la ANTERIOR a esta conversación (atender() ya registró la actual)
-        voz_servicios, tabla_servicios = novedades_servicios(getattr(motor, "actividad_previa", None))
+        voz_servicios, tabla_servicios = novedades_servicios(
+            getattr(motor, "actividad_previa", None), getattr(motor, "_vigia_falla_desde", None) is not None)
         return resp(f"{saludo}Hoy es {fecha_hablada(ahora.date())}. {voz_clima} {voz_agenda} {voz_servicios}"
                     .replace("  ", " ").strip(),
                     tarjetas=tabla_agenda(filas, "Hoy") + tabla_servicios)
