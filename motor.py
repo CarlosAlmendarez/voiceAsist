@@ -54,6 +54,8 @@ CALENDARIO = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE 
 # y el que ejecuta para consultar el vigía (estado de los servicios); la clave nunca pasa por Claude
 VIGIA = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE / 'vigia.py').as_posix()}"
 ULTIMA_ACTIVIDAD = BASE / "ultima_actividad.json"  # cuándo usó el usuario el asistente por última vez
+ALERTAS = BASE / "alertas.json"  # alertas del vigía ya vistas, reconocidas y resueltas
+SIN_VIGIA = "vigia:sin_respuesta"  # id de la alerta propia cuando el vigía no contesta
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 FORMATO = """Responde SIEMPRE y SOLO con un objeto JSON válido (sin texto antes ni después, sin ```), con esta forma:
@@ -246,6 +248,24 @@ def leer_ultima_actividad():
         return None
 
 
+def cargar_alertas() -> dict:
+    try:
+        return json.loads(ALERTAS.read_text(encoding="utf-8")).get("alertas", {})
+    except Exception:
+        return {}
+
+
+def en_horario_silencioso(ahora=None) -> bool:
+    """True dentro de `horario_silencioso` ["HH:MM", "HH:MM"] (puede cruzar la medianoche)."""
+    rango = CFG.get("horario_silencioso")
+    if not rango or len(rango) != 2:
+        return False
+    hm = (ahora or time.localtime())
+    actual = f"{hm.tm_hour:02d}:{hm.tm_min:02d}" if hasattr(hm, "tm_hour") else f"{hm:%H:%M}"
+    ini, fin = rango
+    return ini <= actual < fin if ini <= fin else (actual >= ini or actual < fin)
+
+
 def item_historial(indice: int) -> dict | None:
     h = cargar_historial()
     if not 0 <= indice < len(h):
@@ -408,6 +428,13 @@ class Motor:
         # última actividad ANTERIOR a la conversación actual ("¿qué pasó mientras no estaba?")
         self.actividad_previa = leer_ultima_actividad()
         self._bloqueo_actividad = threading.Lock()
+        # alertas del vigía (las revisa un hilo propio; el bucle principal solo las dice)
+        self._bloqueo_alertas = threading.Lock()
+        self.alertas: dict[str, dict] = cargar_alertas()
+        self.servicios = {"total": None, "no_arriba": None, "revisado": None}
+        self._vigia_falla_desde: float | None = None
+        self._primera_revision = True
+        self._por_decir: list[str] = []  # frases de alertas críticas pendientes de decir
 
     def registrar_actividad(self) -> None:
         """Guarda que el usuario usó el asistente ahora. Si venía de una pausa de más de
@@ -973,6 +1000,197 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
             winsound.Beep(f, 140)
         self.decir(texto)
 
+    # --- alertas del vigía ---
+    def vigilar_alertas(self) -> None:
+        """Hilo propio: cada `segundos_revision_vigia` consulta el vigía. Va aparte del bucle
+        principal para que un vigía caído (5 s de espera por consulta) no frene la escucha."""
+        import vigia
+        if not vigia.configurado():
+            log("Vigía sin configurar (vigia_url / vigia_clave): lo de servicios queda desactivado.")
+            return
+        periodo = max(15, CFG.get("segundos_revision_vigia", 60))
+        while True:
+            try:
+                self.revisar_alertas()
+            except Exception as e:
+                log(f"Error al revisar las alertas del vigía: {e}")
+            time.sleep(periodo)
+
+    def revisar_alertas(self) -> None:
+        import vigia
+        from datetime import datetime
+        try:
+            respuesta, estado = vigia.alertas(), vigia.estado()
+        except vigia.ErrorVigia as err:
+            self._vigia_sin_respuesta(str(err))
+            return
+        ahora = datetime.now().astimezone().isoformat(timespec="seconds")
+        cambios = []
+        with self._bloqueo_alertas:
+            if self._vigia_falla_desde is not None:
+                log("El vigía volvió a responder.")
+            self._vigia_falla_desde = None
+            self.servicios = {"total": estado.get("total") or len(estado.get("monitores", [])),
+                              "no_arriba": len(vigia.no_arriba(estado)), "revisado": ahora}
+            activas = {x["id"]: x for x in respuesta.get("alertas", []) if x.get("id")}
+            for aid, x in activas.items():
+                datos = {k: x.get(k) for k in ("tipo", "severidad", "monitor", "grupo", "desde",
+                                                "duracion", "msg", "texto", "caido_en_silencio")}
+                previa = self.alertas.get(aid)
+                if previa is None:
+                    self.alertas[aid] = {"id": aid, **datos, "vista": ahora, "reconocida": None, "resuelta": None}
+                    cambios.append(("nueva", self.alertas[aid]))
+                else:
+                    previa.update(datos)
+                    if previa.get("resuelta"):  # la misma caída volvió: se muestra otra vez
+                        previa.update(resuelta=None, reconocida=None)
+                        cambios.append(("nueva", previa))
+            # solo con una respuesta válida se dan por resueltas (incluida la de «sin respuesta»)
+            for aid, x in self.alertas.items():
+                if not x.get("resuelta") and aid not in activas:
+                    x["resuelta"] = ahora
+                    cambios.append(("resuelta", x))
+            self._podar_alertas()
+            self._guardar_alertas()
+        self._notificar(cambios)
+
+    def _vigia_sin_respuesta(self, motivo: str) -> None:
+        """Conserva el último estado conocido; tras 5 min sin respuesta crea su propia alerta."""
+        from datetime import datetime
+        cambios = []
+        with self._bloqueo_alertas:
+            if self._vigia_falla_desde is None:
+                self._vigia_falla_desde = time.time()
+                log(f"Vigía: {motivo}. Conservo el último estado conocido.")
+            previa = self.alertas.get(SIN_VIGIA)
+            if time.time() - self._vigia_falla_desde >= 300 and (previa is None or previa.get("resuelta")):
+                desde = datetime.fromtimestamp(self._vigia_falla_desde).astimezone().isoformat(timespec="seconds")
+                self.alertas[SIN_VIGIA] = {
+                    "id": SIN_VIGIA, "tipo": "sin_respuesta", "severidad": "atencion", "monitor": "vigía",
+                    "grupo": None, "desde": desde, "duracion": None, "msg": motivo,
+                    "texto": "No puedo contactar al vigía", "caido_en_silencio": False,
+                    "vista": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "reconocida": None, "resuelta": None}
+                self._guardar_alertas()
+                cambios.append(("nueva", self.alertas[SIN_VIGIA]))
+        self._notificar(cambios)
+
+    def _podar_alertas(self) -> None:
+        """Olvida las resueltas hace más de 30 días (con el candado tomado)."""
+        from datetime import datetime, timedelta
+        limite = datetime.now().astimezone() - timedelta(days=30)
+        for aid in [a for a, x in self.alertas.items() if x.get("resuelta")]:
+            try:
+                if datetime.fromisoformat(self.alertas[aid]["resuelta"]) < limite:
+                    del self.alertas[aid]
+            except ValueError:
+                del self.alertas[aid]
+
+    def _guardar_alertas(self) -> None:
+        try:
+            escribir_json(ALERTAS, {"alertas": self.alertas})
+        except OSError as e:
+            log(f"No se pudo guardar alertas.json: {e}")
+
+    @staticmethod
+    def alerta_publica(x: dict) -> dict:
+        return {k: x.get(k) for k in ("id", "tipo", "severidad", "monitor", "grupo", "desde", "duracion",
+                                       "msg", "texto", "caido_en_silencio", "reconocida", "resuelta")}
+
+    def _notificar(self, cambios: list[tuple[str, dict]]) -> None:
+        """Avisa a la interfaz y al iPhone, y prepara la voz de las críticas nuevas."""
+        if not cambios:
+            return
+        for accion, x in cambios:
+            log(f"Alerta {accion}: [{x.get('severidad')}] {x.get('texto')}")
+            ev = {"tipo": "alerta", "accion": accion, "alerta": self.alerta_publica(x)}
+            emitir(ev)
+            self.publicar(ev)
+        nuevas = [x for accion, x in cambios
+                  if accion == "nueva" and x.get("severidad") == "critico" and not x.get("anunciada")]
+        if not nuevas:
+            return
+        with self._bloqueo_alertas:
+            for x in nuevas:
+                x["anunciada"] = True  # una sola vez, aunque ahora no se pueda hablar
+            self._guardar_alertas()
+        if not self.puede_hablar_alertas():
+            log("Alertas críticas sin voz (horario silencioso, micrófono silenciado o alertas_voz apagado).")
+            return
+        from datetime import datetime
+        from acciones import lista, nombres_hablados
+        arranque = self._arranque.astimezone()
+
+        def antes_de_arrancar(x):
+            try:
+                return datetime.fromisoformat(x.get("desde") or "") < arranque
+            except ValueError:
+                return False
+
+        fuera = [x for x in nuevas if antes_de_arrancar(x)]
+        recientes = [x for x in nuevas if not antes_de_arrancar(x)]
+        frases = []
+        if fuera:  # surgieron con el asistente apagado: una sola frase agrupada
+            nombres = nombres_hablados([x.get("monitor") or x.get("texto") for x in fuera])
+            frases.append(f"Mientras estabas fuera hubo un problema crítico: {nombres}." if len(fuera) == 1
+                          else f"Mientras estabas fuera hubo {len(fuera)} problemas críticos: {nombres}.")
+        if len(recientes) == 1:
+            x = recientes[0]
+            frases.append(f"Alerta crítica: {x['monitor']} está caído." if x.get("tipo") == "caido" and x.get("monitor")
+                          else f"Alerta crítica: {x.get('texto')}.")
+        elif recientes:
+            frases.append(f"Hay {len(recientes)} alertas críticas: "
+                          f"{lista([x.get('monitor') or x.get('texto') for x in recientes][:3])}"
+                          + (f" y {len(recientes) - 3} más." if len(recientes) > 3 else "."))
+        with self._bloqueo_alertas:
+            self._por_decir += frases
+
+    def puede_hablar_alertas(self) -> bool:
+        return bool(CFG.get("alertas_voz", True)) and not self.silenciado and not en_horario_silencioso()
+
+    def alerta_por_decir(self) -> str | None:
+        """La siguiente frase de alerta crítica, si ahora se puede hablar (si no, se descarta:
+        ya está en el panel)."""
+        with self._bloqueo_alertas:
+            if not self._por_decir:
+                return None
+            if not self.puede_hablar_alertas():
+                self._por_decir.clear()
+                return None
+            return self._por_decir.pop(0)
+
+    def decir_alerta(self, frase: str) -> None:
+        emitir({"tipo": "aviso", "texto": frase})
+        for f in (1568, 1175, 1568, 1175):
+            winsound.Beep(f, 120)
+        self.decir(frase)
+
+    def estado_alertas(self) -> dict:
+        """Para el panel y el iPhone: resumen de servicios y alertas activas (críticas primero)."""
+        import vigia
+        if not vigia.configurado():
+            return {"configurado": False, "alertas": []}
+        with self._bloqueo_alertas:
+            activas = [self.alerta_publica(x) for x in self.alertas.values() if not x.get("resuelta")]
+            activas.sort(key=lambda x: x.get("desde") or "", reverse=True)
+            activas.sort(key=lambda x: x.get("severidad") != "critico")
+            return {"configurado": True, **self.servicios, "sin_respuesta": self._vigia_falla_desde is not None,
+                    "alertas": activas}
+
+    def reconocer_alerta(self, aid: str) -> bool:
+        from datetime import datetime
+        with self._bloqueo_alertas:
+            x = self.alertas.get(aid)
+            if not x or x.get("reconocida"):
+                return False
+            x["reconocida"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            self._guardar_alertas()
+        log(f"Alerta vista: {x.get('texto')}")
+        ev = {"tipo": "alerta", "accion": "reconocida", "alerta": self.alerta_publica(x)}
+        emitir(ev)
+        self.publicar(ev)
+        return True
+
     # --- acceso desde el iPhone (remoto.py) ---
     def publicar(self, evento: dict) -> None:
         self.n_buzon += 1
@@ -1071,6 +1289,7 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
     def ejecutar(self) -> None:
         SetLogLevel(-1)
         limpiar_capturas()
+        threading.Thread(target=self.vigilar_alertas, daemon=True, name="vigia").start()
         palabra = CFG["palabra_activacion"].lower()
         emitir({"tipo": "estado", "estado": "cargando"})
         log("Cargando modelos...")
@@ -1114,6 +1333,17 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
                     self.avisar_evento(proximo)
                     wake.Reset()
                     continue
+                # alertas críticas: solo con el asistente libre (ni una respuesta ni el iPhone en curso)
+                if self._por_decir and self.bloqueo.acquire(blocking=False):
+                    try:
+                        frase = self.alerta_por_decir()
+                        if frase:
+                            self.decir_alerta(frase)
+                    finally:
+                        self.bloqueo.release()
+                    if frase:
+                        wake.Reset()
+                        continue
                 try:
                     self.atender(self.textos.get_nowait())
                     wake.Reset()
