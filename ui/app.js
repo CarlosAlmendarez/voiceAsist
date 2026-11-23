@@ -396,6 +396,89 @@ function plegarAgenda(valor) {
   try { localStorage.setItem("agendaPlegada", valor ? "1" : ""); } catch {}
 }
 
+/* ---------- servicios (vigía) ---------- */
+let serviciosDatos = null;
+
+async function cargarServicios() {
+  const a = api();
+  if (!a?.alertas) return;
+  try { serviciosDatos = await a.alertas(); } catch { return; }
+  pintarServicios();
+}
+
+function haceTexto(d) {
+  const min = (Date.now() - d) / 60000;
+  if (min < 60) return `hace ${Math.max(1, Math.round(min))} min`;
+  if (min < 1440) return `hace ${Math.floor(min / 60)} h`;
+  return `hace ${Math.floor(min / 1440)} d`;
+}
+
+function desdeTexto(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const dia = isoLocal(d) === isoLocal(new Date()) ? "" : `${d.getDate()} ${MESES[d.getMonth()].slice(0, 3)}, `;
+  return `desde ${dia}${hora(d)} (${haceTexto(d)})`;
+}
+
+function pintarServicios() {
+  const s = serviciosDatos, sec = $("#servicios");
+  sec.hidden = !s?.configurado;
+  if (sec.hidden) return;
+  const activas = s.alertas || [];
+  const criticas = activas.filter(a => a.severidad === "critico");
+  const n = activas.length;
+  let texto, nivel;
+  if (s.total == null) {
+    [texto, nivel] = [s.sin_respuesta ? "Servicios · el vigía no responde" : "Servicios · revisando…", s.sin_respuesta ? "atencion" : ""];
+  } else if (!n && !s.no_arriba) {
+    [texto, nivel] = [`${s.total} servicios · todo en orden`, "ok"];
+  } else if (!n) {
+    [texto, nivel] = [`${s.total} servicios · ${s.no_arriba} sin responder`, "atencion"];
+  } else {
+    texto = `${s.total} servicios · ${n} ${n === 1 ? "problema" : "problemas"}`
+      + (criticas.length ? ` (${criticas.length} ${criticas.length === 1 ? "crítico" : "críticos"})` : "");
+    nivel = criticas.length ? "critico" : "atencion";
+  }
+  if (s.sin_respuesta && s.total != null) texto += " · sin respuesta del vigía";
+  $("#srv-resumen").textContent = texto;
+  $("#srv-resumen").title = s.revisado ? `Revisado a las ${hora(new Date(s.revisado))}` : "";
+  sec.dataset.nivel = nivel;
+
+  // plegada: solo quedan a la vista las críticas sin «Visto» (fijas hasta pulsarlo)
+  const plegada = sec.classList.contains("plegado");
+  const lista = $("#srv-lista");
+  lista.innerHTML = "";
+  for (const a of activas) {
+    if (a.reconocida || (plegada && a.severidad !== "critico")) continue;
+    const silencio = a.caido_en_silencio && !/silencio/i.test(a.texto || "") ? "caído en silencio" : "";
+    const meta = [desdeTexto(a.desde), silencio, a.msg || ""].filter(Boolean);
+    const li = el(`<li class="alerta ${a.severidad === "critico" ? "critico" : "atencion"}">
+        <i class="marca"></i>
+        <div class="info">
+          <div class="t">${esc(a.texto || a.monitor || "Alerta")}</div>
+          ${meta.length ? `<div class="m">${meta.map(x => `<span>${esc(x)}</span>`).join("")}</div>` : ""}
+        </div>
+        <button class="btn visto" title="Marcar como vista">Visto</button>
+      </li>`);
+    $(".visto", li).onclick = async () => {
+      li.classList.add("saliendo");
+      try { await api()?.reconocer(a.id); } catch {}
+      cargarServicios();
+    };
+    lista.appendChild(li);
+  }
+  const vistas = activas.filter(a => a.reconocida).length;
+  if (vistas && !plegada) lista.appendChild(el(`<li class="vacio">${vistas} ${vistas === 1 ? "alerta vista" : "alertas vistas"} sigue${vistas === 1 ? "" : "n"} activa${vistas === 1 ? "" : "s"}.</li>`));
+}
+
+function plegarServicios(valor) {
+  $("#servicios").classList.toggle("plegado", valor);
+  $("#srv-plegar").title = valor ? "Mostrar los servicios" : "Plegar servicios";
+  try { localStorage.setItem("serviciosPlegados", valor ? "1" : ""); } catch {}
+  pintarServicios();
+}
+
 /* ---------- eventos del motor ---------- */
 window.app = {
   on(e) {
@@ -460,6 +543,10 @@ window.app = {
         resaltarId = e.resaltar || null;
         cargarAgenda();
         break;
+      case "alerta":
+        if (e.accion === "nueva" && e.alerta?.severidad === "critico") abrirPanel();
+        cargarServicios();
+        break;
       case "modo":
         document.body.classList.remove("orbe", "panel");
         document.body.classList.add(e.modo);
@@ -494,6 +581,9 @@ $("#dia-sig").onclick = () => { diaVisto = sumarDias(agendaDatos?.dia || isoLoca
 $("#dia-titulo").onclick = () => { diaVisto = null; cargarAgenda(); };
 $("#dia-plegar").onclick = () => plegarAgenda(!$("#dia").classList.contains("plegado"));
 try { plegarAgenda(!!localStorage.getItem("agendaPlegada")); } catch {}
+$("#srv-plegar").onclick = () => plegarServicios(!$("#servicios").classList.contains("plegado"));
+try { plegarServicios(!!localStorage.getItem("serviciosPlegados")); } catch {}
+setInterval(cargarServicios, 60000);  // resumen al día aunque no cambie ninguna alerta
 setInterval(pintarAgenda, 30000);   // estados "ahora"/"pasado" y la marca de la hora
 setInterval(cargarAgenda, 300000);  // por si se editó agenda.json a mano
 document.addEventListener("keydown", e => { if (e.key === "Escape" && cfg.segundos_ocultar) cerrarPanel(); });
@@ -506,4 +596,5 @@ window.addEventListener("pywebviewready", async () => {
   $("#palabra").textContent = `«${cfg.palabra}»`;
   ESTADOS.reposo = `Di «${cfg.palabra}» para hablarme`;
   cargarAgenda();
+  cargarServicios();
 });

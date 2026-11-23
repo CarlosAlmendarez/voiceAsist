@@ -405,3 +405,49 @@ body.panel #panel { border-left: 1px solid var(--borde); }
 #bienvenida { padding: 8px 12px; }
 #bienvenida h1 { font-size: 19px; margin: 14px 0 6px; }
 .orb.deco { width: 48px; height: 48px; }
+
+/* ---------------- servicios (vigía) ---------------- */
+#servicios {
+  --color: var(--tenue);
+  flex: none; display: flex; flex-direction: column; max-height: 34%;
+  border-bottom: 1px solid var(--borde);
+}
+#servicios[hidden] { display: none; }
+#servicios[data-nivel="ok"] { --color: var(--ok); }
+#servicios[data-nivel="atencion"] { --color: var(--aviso); }
+#servicios[data-nivel="critico"] { --color: var(--mal); background: rgba(248, 113, 113, .05); }
+.srv-cab { display: flex; align-items: center; gap: 9px; padding: 8px 10px 8px 16px; }
+#srv-punto {
+  flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color) 18%, transparent);
+}
+#servicios[data-nivel="critico"] #srv-punto { animation: srv-latido 1.6s ease-in-out infinite; }
+@keyframes srv-latido { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--color) 8%, transparent); } }
+#srv-resumen {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--texto-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#servicios[data-nivel="ok"] #srv-resumen { color: var(--ok); }
+#servicios[data-nivel="critico"] #srv-resumen { color: var(--mal); font-weight: 600; }
+#srv-plegar svg { transition: transform .2s; }
+#servicios.plegado #srv-plegar svg { transform: rotate(180deg); }
+
+#srv-lista { list-style: none; padding: 0 10px 8px; margin: 0; overflow-y: auto; min-height: 0; }
+#srv-lista:empty { display: none; }
+#srv-lista .vacio { font-size: 11.5px; color: var(--tenue); padding: 2px 6px 2px 26px; }
+.alerta {
+  --c: var(--aviso);
+  display: grid; grid-template-columns: 4px 1fr auto; gap: 10px; align-items: center;
+  margin-bottom: 6px; padding: 8px 8px 8px 0; border-radius: 10px; overflow: hidden;
+  background: color-mix(in srgb, var(--c) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c) 24%, transparent);
+  transition: opacity .2s, transform .2s;
+}
+.alerta.critico { --c: var(--mal); }
+.alerta .marca { align-self: stretch; background: var(--c); margin: -8px 0; }
+.alerta .t { font-size: 12.5px; color: var(--texto); line-height: 1.35; overflow-wrap: anywhere; }
+.alerta.critico .t { font-weight: 600; }
+.alerta .m { display: flex; flex-wrap: wrap; gap: 0 8px; margin-top: 2px; font-size: 11px; color: var(--tenue); }
+.alerta .m span { overflow-wrap: anywhere; }
+.alerta .btn.visto { padding: 3px 9px; font-size: 11.5px; color: var(--c); border-color: color-mix(in srgb, var(--c) 35%, transparent); }
+.alerta.saliendo { opacity: 0; transform: translateX(12px); }

@@ -264,6 +264,14 @@ class Api:
         items.sort(key=lambda i: (not i["todo_el_dia"], i["inicio"] or ""))
         return {"dia": d.isoformat(), "hoy": date.today().isoformat(), "items": items}
 
+    def alertas(self):
+        """Resumen de servicios y alertas activas del vigía (configurado: False si no hay vigía)."""
+        return m.estado_alertas()
+
+    def reconocer(self, alerta_id):
+        """Botón «Visto» del panel."""
+        return m.reconocer_alerta(str(alerta_id))
+
     def borrar(self, item_id, tipo):
         """Quitar desde el panel (la interfaz pide confirmar antes)."""
         if tipo == "voz":
