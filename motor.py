@@ -51,6 +51,9 @@ CLAUDE = shutil.which("claude") or str(Path.home() / ".local/bin/claude.exe")
 SIN_VENTANA = 0x08000000  # CREATE_NO_WINDOW
 # comando que Claude ejecuta para leer la agenda local (python.exe, no pythonw, para que imprima)
 CALENDARIO = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE / 'calendario.py').as_posix()}"
+# y el que ejecuta para consultar el vigía (estado de los servicios); la clave nunca pasa por Claude
+VIGIA = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE / 'vigia.py').as_posix()}"
+ULTIMA_ACTIVIDAD = BASE / "ultima_actividad.json"  # cuándo usó el usuario el asistente por última vez
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 FORMATO = """Responde SIEMPRE y SOLO con un objeto JSON válido (sin texto antes ni después, sin ```), con esta forma:
@@ -228,6 +231,21 @@ def guardar_recordatorios(lista: list) -> None:
     RECORDATORIOS.write_text(json.dumps(lista, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def escribir_json(ruta: Path, datos) -> None:
+    """Escritura atómica (archivo temporal + os.replace): nunca deja el archivo a medias."""
+    tmp = ruta.with_suffix(".tmp")
+    tmp.write_text(json.dumps(datos, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, ruta)
+
+
+def leer_ultima_actividad():
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(json.loads(ULTIMA_ACTIVIDAD.read_text(encoding="utf-8"))["fecha"])
+    except Exception:
+        return None
+
+
 def item_historial(indice: int) -> dict | None:
     h = cargar_historial()
     if not 0 <= indice < len(h):
@@ -256,6 +274,8 @@ def describir_herramienta(nombre: str, e: dict) -> str:
     if nombre in ("Bash", "PowerShell"):
         if "calendario.py" in e.get("command", ""):
             return "Revisando tu calendario"
+        if "vigia.py" in e.get("command", ""):
+            return "Revisando tus servicios"
         return f"Ejecutando {e.get('command', '')[:50]}"
     if nombre in ("Edit", "MultiEdit", "NotebookEdit"):
         return f"Editando {Path(e.get('file_path') or e.get('notebook_path') or '').name}"
@@ -385,6 +405,23 @@ class Motor:
         self._avisados: set[str] = set()  # avisos de eventos ya dichos ("id@inicio")
         from datetime import datetime
         self._arranque = datetime.now()
+        # última actividad ANTERIOR a la conversación actual ("¿qué pasó mientras no estaba?")
+        self.actividad_previa = leer_ultima_actividad()
+        self._bloqueo_actividad = threading.Lock()
+
+    def registrar_actividad(self) -> None:
+        """Guarda que el usuario usó el asistente ahora. Si venía de una pausa de más de
+        10 min, la actividad anterior pasa a ser la «previa» (se lee antes de sobrescribirla)."""
+        from datetime import datetime, timedelta
+        ahora = datetime.now().replace(microsecond=0)
+        with self._bloqueo_actividad:
+            anterior = leer_ultima_actividad()
+            if anterior is None or ahora - anterior > timedelta(minutes=10):
+                self.actividad_previa = anterior
+            try:
+                escribir_json(ULTIMA_ACTIVIDAD, {"fecha": ahora.isoformat()})
+            except OSError as e:
+                log(f"No se pudo guardar la última actividad: {e}")
 
     # --- control desde la interfaz ---
     def silenciar(self, valor: bool) -> None:
@@ -619,13 +656,40 @@ El asistente lo dirá en voz alta a esa hora (solo si la PC está encendida). No
 Recordatorios pendientes en esta PC:
 {lista}
 Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo en "voz"."""
+        texto += self.sistema_servicios()
         if self.proyectos:
             lista = "\n".join(f"- {n}: {p}" for n, p in sorted(self.proyectos.items()))
             texto += f"\n\nProyectos conocidos del usuario (nombre: carpeta):\n{lista}"
         return texto
 
+    def sistema_servicios(self) -> str:
+        import vigia
+        if not vigia.configurado():
+            return ""
+        from datetime import date, timedelta
+        hoy = date.today()
+        sabado = hoy - timedelta(days=(hoy.weekday() - 5) % 7)  # el sábado más reciente (o hoy)
+        lunes = sabado + timedelta(days=2)
+        fin_semana = f"--desde {sabado} --hasta {lunes}" if lunes <= hoy else f"--desde {sabado} (aún no termina)"
+        previa = self.actividad_previa
+        ausencia = (f"La última vez que el usuario usó el asistente antes de esta conversación fue el "
+                    f"{previa:%Y-%m-%d} a las {previa:%H:%M}.") if previa else \
+            "No se sabe cuándo usó el asistente por última vez."
+        return f"""
+
+Servicios: el usuario monitorea sus servidores y sitios con Uptime Kuma a través del «vigía» (solo lectura). Para cualquier pregunta sobre si sus servicios, servidores, sitios o APIs están arriba, caídos o tuvieron problemas, ejecuta con Bash exactamente uno de:
+  {VIGIA} estado [--todos]        (qué NO está arriba ahora; --todos lista todos)
+  {VIGIA} alertas                 (alertas activas: critico o atencion)
+  {VIGIA} incidentes --desde hoy|ayer|AAAA-MM-DD[THH:MM] [--hasta AAAA-MM-DD[THH:MM]] [--dias N]   (caídas en un rango; horas locales; --hasta es exclusivo)
+Rangos: "el fin de semana" = del sábado 00:00 al lunes 00:00 más recientes, es decir {fin_semana}. "Anoche", "hoy", "ayer", "esta semana": calcula tú el rango. {ausencia} "Mientras no estaba" o "desde la última vez" = desde ese momento hasta ahora (si fue hace menos de 2 horas o no se sabe, pregunta el rango). "En vacaciones" u otro periodo sin fechas claras: pregunta el rango en "voz" en vez de adivinarlo.
+En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sábado se cayó la API de facturas dos horas; ya volvió"). Si no hubo incidentes, dilo en una frase ("Todo estuvo arriba el fin de semana"). El detalle va en una tarjeta "tabla" con columnas Servicio, Cayó, Volvió, Duración (Volvió = "sigue caído" si no ha vuelto). Si la herramienta responde "No pude contactar al vigía", dilo así; nunca inventes el estado."""
+
     def herramientas(self) -> str:
-        return f"{CFG['herramientas_permitidas']},Bash({CALENDARIO} eventos:*)"
+        permitidas = f"{CFG['herramientas_permitidas']},Bash({CALENDARIO} eventos:*)"
+        import vigia
+        if vigia.configurado():
+            permitidas += f",Bash({VIGIA}:*)"  # solo lectura
+        return permitidas
 
     def preguntar_a_claude(self, pregunta: str, remoto: bool = False) -> dict:
         progreso = (lambda t: self.publicar({"tipo": "progreso", "texto": t})) if remoto \
@@ -745,6 +809,7 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         """Responde a una frase. Devuelve False si la conversación terminó
         (entonces no se escucha un seguimiento)."""
         with self.bloqueo:
+            self.registrar_actividad()
             return self._atender(texto)
 
     def _atender(self, texto: str) -> bool:
@@ -920,6 +985,7 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         """Como atender(), pero devuelve la respuesta en vez de hablarla en la PC. Las
         confirmaciones llegan después por confirmar_remoto() o con un «sí» escrito o dicho."""
         with self.bloqueo:
+            self.registrar_actividad()
             log(f"Tú (iPhone): {texto}")
             t = texto.lower()
             if self.pendiente_remoto:
