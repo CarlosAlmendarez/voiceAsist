@@ -45,5 +45,12 @@
   "modo_inicial": "panel",
   "panel_fijo": true,
   "ancho_panel": 400,
-  "minutos_aviso_eventos": 10
+  "minutos_aviso_eventos": 10,
+  "vigia_url": "",
+  "segundos_revision_vigia": 60,
+  "alertas_voz": true,
+  "horario_silencioso": [
+    "23:00",
+    "07:00"
+  ]
 }
