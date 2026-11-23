@@ -180,10 +180,23 @@ function construirTarjeta(t) {
   }
 }
 
+/* ---------- banda roja: alertas críticas sin «Visto» (se reconocen en el panel de la PC) ---------- */
+function pintarBanda(s) {
+  const banda = $("#banda-alertas");
+  const criticas = (s?.alertas || []).filter(a => a.severidad === "critico" && !a.reconocida);
+  banda.hidden = !criticas.length;
+  if (!criticas.length) return;
+  const nombres = criticas.slice(0, 3).map(a => a.monitor || a.texto).join(", ")
+    + (criticas.length > 3 ? ` y ${criticas.length - 3} más` : "");
+  banda.innerHTML = `<b>${criticas.length === 1 ? "Alerta crítica" : `${criticas.length} alertas críticas`}</b> ${esc(nombres)}`;
+  banda.title = criticas.map(a => a.texto).join("\n");
+}
+
 /* ---------- novedades: progreso, tarjetas pendientes, tareas y recordatorios ---------- */
 async function revisarNovedades(inicial = false) {
   try {
     const r = await api(`/api/novedades?desde=${novedad}`);
+    pintarBanda(r.alertas);
     if (!inicial) {
       for (const e of r.eventos) {
         if (e.tipo === "progreso" && actual && document.body.dataset.estado === "pensando") {

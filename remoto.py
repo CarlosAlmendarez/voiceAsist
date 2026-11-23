@@ -103,7 +103,14 @@ def confirmar():
 @protegido
 def novedades():
     desde = int(bottle.request.query.get("desde") or 0)
-    return respuesta_json(motor.novedades(desde))
+    # los eventos "alerta" llegan por el buzón; además va el estado actual para la banda roja
+    return respuesta_json({**motor.novedades(desde), "alertas": motor.estado_alertas()})
+
+
+@app.get("/api/alertas")
+@protegido
+def alertas():
+    return respuesta_json(motor.estado_alertas())
 
 
 @app.get("/api/voz")
