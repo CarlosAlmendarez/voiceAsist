@@ -55,6 +55,7 @@ CALENDARIO = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE 
 VIGIA = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE / 'vigia.py').as_posix()}"
 ULTIMA_ACTIVIDAD = BASE / "ultima_actividad.json"  # cuándo usó el usuario el asistente por última vez
 ALERTAS = BASE / "alertas.json"  # alertas del vigía ya vistas, reconocidas y resueltas
+AVISADOS = BASE / "avisados.json"  # avisos de la agenda ya dichos (para no repetirlos al reiniciar)
 SIN_VIGIA = "vigia:sin_respuesta"  # id de la alerta propia cuando el vigía no contesta
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -248,6 +249,16 @@ def leer_ultima_actividad():
         return None
 
 
+def cargar_avisados() -> set[str]:
+    """Claves "id@AAAA-MM-DDTHH:MM" de los avisos ya dichos; se olvidan las de hace más de 2 días."""
+    try:
+        claves = json.loads(AVISADOS.read_text(encoding="utf-8")).get("avisados", [])
+    except Exception:
+        return set()
+    limite = time.strftime("%Y-%m-%dT%H:%M", time.localtime(time.time() - 2 * 86400))
+    return {c for c in claves if c.partition("@")[2] >= limite}
+
+
 def cargar_alertas() -> dict:
     try:
         return json.loads(ALERTAS.read_text(encoding="utf-8")).get("alertas", {})
@@ -422,7 +433,7 @@ class Motor:
         self.n_buzon = 0
         self.pendiente_remoto: dict | None = None  # tarea o evento esperando un sí desde el iPhone
         self._revision_agenda = 0.0
-        self._avisados: set[str] = set()  # avisos de eventos ya dichos ("id@inicio")
+        self._avisados: set[str] = cargar_avisados()  # avisos de eventos ya dichos ("id@inicio")
         from datetime import datetime
         self._arranque = datetime.now()
         # última actividad ANTERIOR a la conversación actual ("¿qué pasó mientras no estaba?")
@@ -982,6 +993,10 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
             # solo avisos recientes: lo que pasó con el asistente cerrado no se anuncia tarde
             if clave not in self._avisados and max(aviso, self._arranque) <= ahora < aviso + timedelta(minutes=5):
                 self._avisados.add(clave)
+                try:  # en disco: si el asistente se reinicia dentro de la ventana, no lo repite
+                    escribir_json(AVISADOS, {"avisados": sorted(self._avisados)})
+                except OSError as e:
+                    log(f"No se pudo guardar avisados.json: {e}")
                 return {**o, "minutos": minutos}
         return None
 

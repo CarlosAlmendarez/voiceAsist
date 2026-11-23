@@ -21,3 +21,4 @@ config.local.json
 alertas.json
 ultima_actividad.json
 *.tmp
+avisados.json
