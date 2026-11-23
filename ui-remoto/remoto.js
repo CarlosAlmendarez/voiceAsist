@@ -180,16 +180,43 @@ function construirTarjeta(t) {
   }
 }
 
-/* ---------- banda roja: alertas críticas sin «Visto» (se reconocen en el panel de la PC) ---------- */
+/* ---------- banda roja: alertas críticas sin «Visto» ---------- */
+const vistasLocal = new Set();  // «Visto» ya pulsado: se oculta sin esperar al siguiente sondeo
+let firmaBanda = "";
+
+function desdeTexto(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return "";
+  const h = d.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit" });
+  const hoy = new Date().toDateString() === d.toDateString();
+  return `desde ${hoy ? "" : d.toLocaleDateString("es-MX", { day: "numeric", month: "short" }) + ", "}${h}`;
+}
+
 function pintarBanda(s) {
   const banda = $("#banda-alertas");
-  const criticas = (s?.alertas || []).filter(a => a.severidad === "critico" && !a.reconocida);
+  const criticas = (s?.alertas || []).filter(a => a.severidad === "critico" && !a.reconocida && !vistasLocal.has(a.id));
+  const firma = criticas.map(a => a.id).join("|");
+  if (firma === firmaBanda && !banda.hidden === !!criticas.length) return;  // sin cambios: no repinta
+  firmaBanda = firma;
   banda.hidden = !criticas.length;
-  if (!criticas.length) return;
-  const nombres = criticas.slice(0, 3).map(a => a.monitor || a.texto).join(", ")
-    + (criticas.length > 3 ? ` y ${criticas.length - 3} más` : "");
-  banda.innerHTML = `<b>${criticas.length === 1 ? "Alerta crítica" : `${criticas.length} alertas críticas`}</b> ${esc(nombres)}`;
-  banda.title = criticas.map(a => a.texto).join("\n");
+  if (!criticas.length) { banda.innerHTML = ""; return; }
+  banda.innerHTML = `<div class="banda-cab"><b>${criticas.length === 1 ? "Alerta crítica" : `${criticas.length} alertas críticas`}</b></div>`;
+  for (const a of criticas) {
+    const fila = el(`<div class="banda-fila">
+        <div class="banda-info"><span class="t">${esc(a.texto || a.monitor || "Alerta")}</span>
+          <span class="m">${esc(desdeTexto(a.desde))}</span></div>
+        <button class="visto">Visto</button>
+      </div>`);
+    $(".visto", fila).onclick = async () => {
+      vistasLocal.add(a.id);
+      pintarBanda(s);
+      try {
+        await api("/api/reconocer", { method: "POST", headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ id: a.id }) });
+      } catch { vistasLocal.delete(a.id); firmaBanda = ""; }  // falló: vuelve a mostrarse
+    };
+    banda.appendChild(fila);
+  }
 }
 
 /* ---------- novedades: progreso, tarjetas pendientes, tareas y recordatorios ---------- */

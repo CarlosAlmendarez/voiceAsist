@@ -113,6 +113,16 @@ def alertas():
     return respuesta_json(motor.estado_alertas())
 
 
+@app.post("/api/reconocer")
+@protegido
+def reconocer():
+    """Botón «Visto» de la banda roja (el panel de la PC se actualiza con el evento `alerta`)."""
+    aid = str((bottle.request.json or {}).get("id") or "")
+    if not aid:
+        bottle.abort(400, "Falta el id de la alerta.")
+    return respuesta_json({"ok": motor.reconocer_alerta(aid)})
+
+
 @app.get("/api/voz")
 @protegido
 def voz():
