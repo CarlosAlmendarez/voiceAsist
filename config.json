@@ -26,7 +26,7 @@
   "voz": "Helena",
   "velocidad_voz": 185,
   "minutos_contexto": 30,
-  "segundos_ocultar": 60,
+  "segundos_ocultar": 0,
   "atajo": "ctrl+alt+a",
   "herramientas_permitidas": "Read,Grep,Glob,WebSearch,WebFetch,Bash(git status:*),Bash(git log:*)",
   "modelo_pregunta": "sonnet",
@@ -41,5 +41,9 @@
   "beam_whisper": 1,
   "segundos_seguimiento": 5,
   "esfuerzo_pregunta": "low",
-  "puerto_remoto": 8765
+  "puerto_remoto": 8765,
+  "modo_inicial": "panel",
+  "panel_fijo": true,
+  "ancho_panel": 400,
+  "minutos_aviso_eventos": 10
 }

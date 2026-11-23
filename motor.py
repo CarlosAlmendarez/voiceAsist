@@ -49,7 +49,7 @@ EDGE = next((p for p in [
 ] if p.exists()), None)
 CLAUDE = shutil.which("claude") or str(Path.home() / ".local/bin/claude.exe")
 SIN_VENTANA = 0x08000000  # CREATE_NO_WINDOW
-# comando que Claude ejecuta para leer Google Calendar (python.exe, no pythonw, para que imprima)
+# comando que Claude ejecuta para leer la agenda local (python.exe, no pythonw, para que imprima)
 CALENDARIO = f"{Path(sys.executable).with_name('python.exe').as_posix()} {(BASE / 'calendario.py').as_posix()}"
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
@@ -279,7 +279,7 @@ def interpretar(texto: str) -> dict:
             if not (isinstance(tarea, dict) and tarea.get("descripcion") and tarea.get("plan")):
                 tarea = None
             evento = data.get("evento")
-            if not (isinstance(evento, dict) and evento.get("titulo") and evento.get("inicio")):
+            if not (isinstance(evento, dict) and (evento.get("id") or (evento.get("titulo") and evento.get("inicio")))):
                 evento = None
             local = data.get("recordatorio_local")
             if not (isinstance(local, dict) and local.get("texto") and (local.get("en_minutos") or local.get("cuando"))):
@@ -297,11 +297,29 @@ def interpretar(texto: str) -> dict:
 
 
 def describir_evento(ev: dict) -> str:
+    if ev.get("id"):  # cambio o borrado de uno existente: se describe con sus datos guardados
+        import calendario
+        guardado = calendario.buscar_por_id(ev["id"]) or {"titulo": ev.get("titulo") or ev["id"], "inicio": "?"}
+        antes = describir_evento({**guardado, "id": None})
+        if ev.get("borrar"):
+            return f"Borrar {antes}"
+        return f"Cambiar {antes} → {describir_evento({**guardado, **ev, 'id': None})}"
     cuando = ev["inicio"].replace("T", " ") + (f" → {ev['fin'].replace('T', ' ')}" if ev.get("fin") else "")
     repetir = {"diario": "cada día", "semanal": "cada semana", "mensual": "cada mes", "anual": "cada año"}
-    extras = [x for x in ("recordatorio" if ev.get("recordatorio") else "",
-                          repetir.get(ev.get("repetir") or ""), ev.get("lugar")) if x]
+    rep_txt = repetir.get(ev.get("repetir") or "", "")
+    if rep_txt and ev.get("hasta"):
+        rep_txt += f" hasta el {ev['hasta']}"
+    extras = [x for x in ("recordatorio" if ev.get("recordatorio") else "", rep_txt, ev.get("lugar")) if x]
     return f"{ev['titulo']} — {cuando}" + (f" ({', '.join(extras)})" if extras else "")
+
+
+def pregunta_evento(ev: dict) -> str:
+    """La pregunta de confirmación para crear, cambiar o borrar un evento."""
+    if not ev.get("id"):
+        return f"¿Añado «{ev['titulo']}» a tu agenda?"
+    import calendario
+    titulo = (calendario.buscar_por_id(ev["id"]) or {}).get("titulo") or ev.get("titulo") or "el evento"
+    return f"¿Borro «{titulo}» de tu agenda?" if ev.get("borrar") else f"¿Cambio «{titulo}» en tu agenda?"
 
 
 def es_si_o_no(texto: str) -> bool | None:
@@ -363,6 +381,10 @@ class Motor:
         self.buzon: list[dict] = []  # novedades para el iPhone (tareas, recordatorios, tarjetas)
         self.n_buzon = 0
         self.pendiente_remoto: dict | None = None  # tarea o evento esperando un sí desde el iPhone
+        self._revision_agenda = 0.0
+        self._avisados: set[str] = set()  # avisos de eventos ya dichos ("id@inicio")
+        from datetime import datetime
+        self._arranque = datetime.now()
 
     # --- control desde la interfaz ---
     def silenciar(self, valor: bool) -> None:
@@ -576,16 +598,16 @@ class Motor:
     def sistema(self) -> str:
         hoy = time.localtime()
         texto = f"{SISTEMA}\n\nAhora es {DIAS[hoy.tm_wday]} {time.strftime('%Y-%m-%d %H:%M', hoy)}."
-        if CFG.get("calendarios_google"):
-            texto += f"""
+        texto += f"""
 
-Agenda: puedes leer el Google Calendar del usuario (solo lectura) ejecutando con Bash exactamente:
+Agenda: el usuario tiene una agenda local en esta PC (no usa Google Calendar). Léela ejecutando con Bash exactamente:
   {CALENDARIO} eventos --desde hoy|mañana|AAAA-MM-DD --dias N [--buscar "texto"]
-Úsalo para cualquier pregunta sobre su agenda, citas, reuniones, cumpleaños o disponibilidad. Si pregunta cuándo o dónde es algo suyo (un concierto, viaje, cita, partido, evento, "mi..."), busca PRIMERO en el calendario con --buscar y un rango amplio (--desde hoy --dias 366) antes de ir a la web. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento).
-Si el usuario pide AÑADIR un evento, cita, recordatorio o cumpleaños, no uses "tarea": añade al JSON
-  "evento": {{"titulo": "...", "inicio": "AAAA-MM-DD" (todo el día) o "AAAA-MM-DDTHH:MM", "fin": opcional (mismo formato; por defecto 1 hora o 1 día), "repetir": opcional "diario"|"semanal"|"mensual"|"anual", "lugar": opcional, "descripcion": opcional, "recordatorio_min": opcional (minutos antes), "recordatorio": opcional true}}
-Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 de diciembre). Los cumpleaños y aniversarios son de todo el día y se repiten cada año; su título es "Cumpleaños de <nombre>". Si falta la hora de una cita, pregúntala en vez de inventarla. En "voz" repite qué vas a añadir y cuándo, y termina preguntando si lo confirmas; nunca digas que ya está añadido. No puedes mover ni borrar eventos: si te lo piden, dilo.
-Un "recuérdame X" para otro día, para dentro de más de 12 horas, o cuando mencione el calendario o el celular, es un evento con "recordatorio": true (titulo = lo que hay que recordar, inicio con fecha y hora): dura 15 minutos, no ocupa el tiempo y avisa justo a esa hora en su celular. Si no dice la hora, pregúntala."""
+Cada línea empieza con el id del evento entre corchetes. Úsalo para cualquier pregunta sobre su agenda, actividades, citas, reuniones, cumpleaños o disponibilidad. Si pregunta cuándo o dónde es algo suyo (un concierto, viaje, cita, partido, evento, "mi..."), busca PRIMERO en la agenda con --buscar y un rango amplio (--desde hoy --dias 366) antes de ir a la web. Calcula tú el rango (por ejemplo "esta semana" = desde hoy hasta el domingo). En "voz" di las horas de forma natural ("a las cuatro de la tarde"); si hay varios eventos, muéstralos en una tarjeta "tabla" (columnas Día, Hora, Evento).
+Si el usuario pide AÑADIR un evento, actividad, cita, comida, recordatorio o cumpleaños, no uses "tarea": añade al JSON
+  "evento": {{"titulo": "...", "inicio": "AAAA-MM-DD" (todo el día) o "AAAA-MM-DDTHH:MM", "fin": opcional (mismo formato; por defecto 1 hora o 1 día), "repetir": opcional "diario"|"semanal"|"mensual"|"anual", "hasta": opcional "AAAA-MM-DD" (último día en que se repite), "lugar": opcional, "descripcion": opcional, "recordatorio_min": opcional (minutos antes para avisar), "recordatorio": opcional true}}
+Para CAMBIAR uno existente, busca su id y devuelve "evento": {{"id": "e...", y solo los campos que cambian}}; para BORRARLO, "evento": {{"id": "e...", "borrar": true}} (si se repite, se borra la serie completa: dilo).
+Usa la próxima fecha futura que encaje ("el 10 de diciembre" = el próximo 10 de diciembre; "a las 3" sin día = hoy si aún no pasa). Los cumpleaños y aniversarios son de todo el día y se repiten cada año; su título es "Cumpleaños de <nombre>". Si falta la hora de una cita, pregúntala en vez de inventarla. Títulos cortos con mayúscula inicial ("Comida", "Dentista"). En "voz" repite qué vas a hacer y cuándo, y termina preguntando si lo confirmas; nunca digas que ya está hecho.
+Un "recuérdame X" para otro día o para dentro de más de 12 horas es un evento con "recordatorio": true (titulo = lo que hay que recordar, inicio con fecha y hora): dura 15 minutos y el asistente lo dice en voz alta a esa hora. Los demás eventos con hora se avisan por voz {CFG.get("minutos_aviso_eventos", 10)} minutos antes. Si no dice la hora, pregúntala."""
         texto += """
 
 Recordatorios por voz en esta PC: si pide que le recuerdes algo dentro de poco ("en 20 minutos", "en una hora", "a las seis" de hoy), añade al JSON
@@ -603,15 +625,14 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         return texto
 
     def herramientas(self) -> str:
-        h = CFG["herramientas_permitidas"]
-        return f"{h},Bash({CALENDARIO} eventos:*)" if CFG.get("calendarios_google") else h
+        return f"{CFG['herramientas_permitidas']},Bash({CALENDARIO} eventos:*)"
 
     def preguntar_a_claude(self, pregunta: str, remoto: bool = False) -> dict:
         progreso = (lambda t: self.publicar({"tipo": "progreso", "texto": t})) if remoto \
             else (lambda t: emitir({"tipo": "progreso", "texto": t}))
         if remoto:
             pregunta = ("[El usuario te habla desde su iPhone, lejos de la PC: no uses recordatorio_local "
-                        "(para recordatorios usa un evento con \"recordatorio\": true). Lo que hagas en la PC "
+                        "(para recordatorios usa un evento con \"recordatorio\": true; se avisa por voz en la PC y aquí). Lo que hagas en la PC "
                         "(volumen, abrir apps) no afecta al teléfono.]\n\n" + pregunta)
         if self.nota_contexto:
             pregunta = f"{self.nota_contexto}\n\n{pregunta}"
@@ -772,7 +793,7 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
             pregunta = f"¿Ejecuto «{tarea['descripcion']}»?"
         elif evento:
             propuesta = f"**Evento propuesto:** {describir_evento(evento)}"
-            pregunta = f"¿Añado «{evento['titulo']}» a tu calendario?"
+            pregunta = pregunta_evento(evento)
         cid = f"k{int(time.time() * 1000)}"
         if tarea or evento:
             resp["detalle"] = (resp["detalle"] + "\n\n" if resp["detalle"] else "") + propuesta
@@ -822,20 +843,70 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
         self.hablar(r["voz"])
 
     def _crear_evento(self, evento: dict) -> dict:
-        import calendario  # carga google-auth solo cuando hace falta
+        """Crea, cambia o borra (según traiga "id" / "borrar") un evento de la agenda local."""
+        import calendario
         try:
-            creado = calendario.crear_evento(evento)
-        except PermissionError as e:
-            log(f"Calendario sin permiso de escritura: {e}")
-            return {"voz": "No tengo permiso para añadir eventos. En Google Calendar, cambia el permiso de la "
-                           "cuenta del asistente a «Hacer cambios en los eventos».", "detalle": "", "tarjetas": []}
-        except Exception as e:
-            log(f"No se pudo crear el evento: {e}")
-            return {"voz": "No pude crear el evento. Revisa el registro.", "detalle": "", "tarjetas": []}
-        log(f"Evento creado: {describir_evento(evento)} ({creado.get('htmlLink')})")
-        return {"voz": "Listo, ya está en tu calendario.", "detalle": "",
-                "tarjetas": [{"tipo": "fuentes", "enlaces": [
-                    {"titulo": f"Ver «{evento['titulo']}» en Google Calendar", "url": creado.get("htmlLink", "")}]}]}
+            if evento.get("id") and evento.get("borrar"):
+                ev, voz = calendario.borrar_evento(evento["id"]), "Listo, lo quité de tu agenda."
+            elif evento.get("id"):
+                ev, voz = calendario.modificar_evento(evento["id"], evento), "Listo, ya lo cambié."
+            else:
+                ev, voz = calendario.crear_evento(evento), "Listo, ya está en tu agenda."
+        except KeyError:
+            return {"voz": "No encontré ese evento en tu agenda.", "detalle": "", "tarjetas": []}
+        except (ValueError, TypeError) as e:
+            log(f"Evento no válido {evento}: {e}")
+            return {"voz": "No pude guardar el evento: la fecha no es válida. ¿Me lo dices otra vez?",
+                    "detalle": "", "tarjetas": []}
+        log(f"Agenda: {voz} {describir_evento({**ev, 'id': None})} [{ev['id']}]")
+        emitir({"tipo": "agenda", "dia": ev["inicio"][:10],
+                "resaltar": None if evento.get("borrar") else ev["id"]})
+        self.publicar({"tipo": "agenda"})
+        return {"voz": voz, "detalle": "", "tarjetas": []}
+
+    # --- avisos de la agenda ---
+    def evento_por_avisar(self) -> dict | None:
+        """La aparición de un evento cuya hora de aviso acaba de llegar (revisa cada 20 s)."""
+        if time.time() - self._revision_agenda < 20:
+            return None
+        self._revision_agenda = time.time()
+        import calendario
+        from datetime import date, datetime, timedelta
+        ahora = datetime.now()
+        previo = CFG.get("minutos_aviso_eventos", 10)
+        for o in calendario.listar(date.today(), 2):
+            if o["todo_el_dia"]:
+                continue
+            if o.get("recordatorio"):
+                minutos = o.get("recordatorio_min") or 0
+            elif o.get("recordatorio_min") is not None:
+                minutos = o["recordatorio_min"]
+            elif previo:
+                minutos = previo
+            else:
+                continue
+            clave = f"{o['id']}@{o['inicio_real']:%Y-%m-%dT%H:%M}"
+            aviso = o["inicio_real"] - timedelta(minutes=minutos)
+            # solo avisos recientes: lo que pasó con el asistente cerrado no se anuncia tarde
+            if clave not in self._avisados and max(aviso, self._arranque) <= ahora < aviso + timedelta(minutes=5):
+                self._avisados.add(clave)
+                return {**o, "minutos": minutos}
+        return None
+
+    def avisar_evento(self, o: dict) -> None:
+        from acciones import hora_hablada
+        if o.get("recordatorio"):
+            texto = f"Te recuerdo: {o['titulo']}"
+        elif o["minutos"] == 0:
+            texto = f"Ya es hora: {o['titulo']}"
+        else:
+            texto = f"En {o['minutos']} minutos: {o['titulo']}, a {hora_hablada(o['inicio_real'])}"
+        self.publicar({"tipo": "aviso", "texto": texto, "voz": texto, "detalle": "", "tarjetas": []})
+        emitir({"tipo": "aviso", "texto": texto})
+        emitir({"tipo": "agenda"})
+        for f in (1175, 1397, 1175):
+            winsound.Beep(f, 140)
+        self.decir(texto)
 
     # --- acceso desde el iPhone (remoto.py) ---
     def publicar(self, evento: dict) -> None:
@@ -892,7 +963,7 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
                     pregunta = f"¿Ejecuto «{tarea['descripcion']}»?"
                 else:
                     propuesta = f"**Evento propuesto:** {describir_evento(evento)}"
-                    pregunta = f"¿Añado «{evento['titulo']}» a tu calendario?"
+                    pregunta = pregunta_evento(evento)
                 resp["detalle"] = (resp["detalle"] + "\n\n" if resp["detalle"] else "") + propuesta
                 self.pendiente_remoto = {"id": cid, "tarea": tarea, "evento": evento, "pregunta": pregunta}
                 resp["confirmar"] = {"id": cid, "pregunta": pregunta}
@@ -965,6 +1036,16 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
                 vencido = self.recordatorio_vencido()
                 if vencido:
                     self.recordar(vencido)
+                    emitir({"tipo": "agenda"})
+                    wake.Reset()
+                    continue
+                try:
+                    proximo = self.evento_por_avisar()
+                except Exception as e:
+                    log(f"No se pudo revisar la agenda: {e}")
+                    proximo = None
+                if proximo:
+                    self.avisar_evento(proximo)
                     wake.Reset()
                     continue
                 try:

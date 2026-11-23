@@ -17,7 +17,7 @@ const ESTADOS = {
 const ESTADOS_TAREA = { en_curso: "Trabajando", hecha: "Terminada", error: "Falló", cancelada: "Cancelada" };
 
 let actual = null;        // intercambio en curso
-let cfg = { segundos_ocultar: 60, palabra: "asistente" };
+let cfg = { segundos_ocultar: 0, palabra: "asistente" };
 let temporizadorOcultar = null;
 let temporizadoresVoz = [];
 let ratonEncima = false;
@@ -270,6 +270,132 @@ async function abrirHistorial() {
   $("#historial").hidden = false;
 }
 
+/* ---------- agenda del día ---------- */
+const MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+  "septiembre", "octubre", "noviembre", "diciembre"];
+const DIAS_SEM = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+const REPITE = { diario: "cada día", semanal: "cada semana", mensual: "cada mes", anual: "cada año" };
+let diaVisto = null;      // "AAAA-MM-DD" que se está viendo; null = hoy
+let agendaDatos = null;
+let resaltarId = null;    // evento recién creado: se ilumina al pintarlo
+
+const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const deIso = s => { const [y, m, d] = s.slice(0, 10).split("-").map(Number); const [h, mi] = (s.slice(11) || "0:0").split(":").map(Number); return new Date(y, m - 1, d, h || 0, mi || 0); };
+const sumarDias = (iso, n) => { const d = deIso(iso); d.setDate(d.getDate() + n); return isoLocal(d); };
+const hora = d => d.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit" }).replace(/\s?([ap])\.\s?m\./i, " $1. m.");
+function duracion(min) {
+  if (min < 1) return "menos de un minuto";
+  if (min < 60) return `${Math.round(min)} min`;
+  const h = Math.floor(min / 60), m = Math.round(min % 60);
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+async function cargarAgenda() {
+  const a = api();
+  if (!a?.agenda) return;
+  try { agendaDatos = await a.agenda(diaVisto); } catch { return; }
+  pintarAgenda();
+}
+
+function estadoItem(it, ahora) {
+  if (it.todo_el_dia) return "todo-dia";
+  const ini = deIso(it.inicio), fin = it.fin ? deIso(it.fin) : ini;
+  if (fin <= ahora && (it.fin || ini < ahora)) return "pasado";
+  return ini <= ahora ? "ahora" : "futuro";
+}
+
+function pintarAgenda() {
+  if (!agendaDatos) return;
+  const { dia, hoy, items } = agendaDatos;
+  const ahora = new Date();
+  if (!diaVisto && hoy !== isoLocal(ahora)) { cargarAgenda(); return; }  // pasó la medianoche
+  const esHoy = dia === hoy, d = deIso(dia);
+  $("#dia-nombre").textContent = esHoy ? "Hoy" : dia === sumarDias(hoy, 1) ? "Mañana"
+    : dia === sumarDias(hoy, -1) ? "Ayer" : DIAS_SEM[d.getDay()].replace(/^./, c => c.toUpperCase());
+  $("#dia-fecha").textContent = `${esHoy || dia === sumarDias(hoy, 1) || dia === sumarDias(hoy, -1) ? DIAS_SEM[d.getDay()] + " " : ""}${d.getDate()} de ${MESES[d.getMonth()]}`;
+  $("#dia-titulo").classList.toggle("otro", !esHoy);
+  $("#dia-cuenta").textContent = items.length ? `${items.length} ${items.length === 1 ? "actividad" : "actividades"}` : "";
+
+  const lista = $("#dia-lista");
+  lista.innerHTML = "";
+  if (!items.length) {
+    lista.appendChild(el(`<li class="vacio">${esHoy ? "Día libre." : "Nada agendado."} Di «agrega comida a las 3» para anotar algo.</li>`));
+  }
+  let marcaPuesta = !esHoy;
+  for (const it of items) {
+    const est = esHoy ? estadoItem(it, ahora) : deIso(dia) < deIso(hoy) ? "pasado" : "futuro";
+    if (!marcaPuesta && (est === "futuro" || est === "ahora")) {
+      lista.appendChild(el(`<li class="marca-ahora"><span>${hora(ahora)}</span></li>`));
+      marcaPuesta = true;
+    }
+    lista.appendChild(itemAgenda(it, est, ahora));
+  }
+  if (!marcaPuesta && items.some(i => !i.todo_el_dia)) lista.appendChild(el(`<li class="marca-ahora"><span>${hora(ahora)}</span></li>`));
+
+  // aviso de lo que sigue (solo hoy)
+  const banda = $("#dia-siguiente");
+  const enCurso = esHoy && items.find(i => estadoItem(i, ahora) === "ahora");
+  const prox = esHoy && items.find(i => estadoItem(i, ahora) === "futuro");
+  if (enCurso && enCurso.fin) {
+    banda.innerHTML = `<b>Ahora</b> ${esc(enCurso.titulo)} <span>· termina en ${duracion((deIso(enCurso.fin) - ahora) / 60000)}</span>`;
+  } else if (prox) {
+    banda.innerHTML = `<b>Sigue</b> ${esc(prox.titulo)} <span>· en ${duracion((deIso(prox.inicio) - ahora) / 60000)}</span>`;
+  }
+  banda.hidden = !(enCurso?.fin || prox);
+
+  if (resaltarId) {
+    const n = lista.querySelector(`[data-id="${CSS.escape(resaltarId)}"]`);
+    if (n) { n.classList.add("nuevo"); n.scrollIntoView({ block: "nearest", behavior: "smooth" }); }
+    resaltarId = null;
+  }
+}
+
+function itemAgenda(it, est, ahora) {
+  let cuando = `<div class="hora todo">Todo<br>el día</div>`, meta = [];
+  if (!it.todo_el_dia) {
+    const ini = deIso(it.inicio), [, h, ap] = hora(ini).match(/^(\S+)\s*(.*)$/);
+    cuando = `<div class="hora"><b>${esc(h)}</b><span>${esc(ap)}</span></div>`;
+    if (it.fin && it.tipo === "evento") meta.push(`${hora(ini)} – ${hora(deIso(it.fin))}`);
+  }
+  if (it.tipo === "recordatorio") meta.push("Recordatorio");
+  if (it.tipo === "voz") meta.push("Aviso por voz");
+  if (it.lugar) meta.push(esc(it.lugar));
+  if (it.repetir) meta.push(`↻ ${REPITE[it.repetir] || it.repetir}`);
+  let progreso = "";
+  if (est === "ahora" && it.fin) {
+    const p = (ahora - deIso(it.inicio)) / (deIso(it.fin) - deIso(it.inicio));
+    progreso = `<i class="progreso" style="--p:${Math.min(1, Math.max(0, p)).toFixed(3)}"></i>`;
+  }
+  const n = el(`<li class="item ${est} ${it.tipo}" data-id="${esc(it.id)}">
+      ${cuando}
+      <div class="linea"><i></i></div>
+      <div class="info">
+        <div class="t">${esc(it.titulo)}</div>
+        ${meta.length ? `<div class="m">${meta.map(x => `<span>${x}</span>`).join("")}</div>` : ""}
+        ${it.nota ? `<div class="nota">${esc(it.nota)}</div>` : ""}
+        ${progreso}
+      </div>
+      <div class="acciones">
+        <button class="quitar" title="Quitar de la agenda"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+    </li>`);
+  $(".quitar", n).onclick = () => {
+    const acc = $(".acciones", n);
+    const extra = it.repetir ? " (todas las repeticiones)" : "";
+    acc.innerHTML = `<span class="seguro">¿Quitar${extra}?</span><button class="btn si">Sí</button><button class="btn no">No</button>`;
+    n.classList.add("confirmando");
+    $(".si", acc).onclick = () => api()?.borrar(it.id, it.tipo);
+    $(".no", acc).onclick = () => pintarAgenda();
+  };
+  return n;
+}
+
+function plegarAgenda(valor) {
+  $("#dia").classList.toggle("plegado", valor);
+  $("#dia-plegar").title = valor ? "Mostrar la agenda" : "Plegar la agenda";
+  try { localStorage.setItem("agendaPlegada", valor ? "1" : ""); } catch {}
+}
+
 /* ---------- eventos del motor ---------- */
 window.app = {
   on(e) {
@@ -329,6 +455,15 @@ window.app = {
         conv.innerHTML = "";
         actual = null;
         break;
+      case "agenda":
+        if (e.dia) diaVisto = agendaDatos && e.dia === agendaDatos.hoy ? null : e.dia;
+        resaltarId = e.resaltar || null;
+        cargarAgenda();
+        break;
+      case "modo":
+        document.body.classList.remove("orbe", "panel");
+        document.body.classList.add(e.modo);
+        break;
       case "abrir_panel":
         abrirPanel();
         setTimeout(() => $("#entrada").focus(), 150);
@@ -354,12 +489,21 @@ $("#form").onsubmit = ev => {
   $("#entrada").value = "";
   api()?.preguntar(texto);
 };
-document.addEventListener("keydown", e => { if (e.key === "Escape") cerrarPanel(); });
+$("#dia-ant").onclick = () => { diaVisto = sumarDias(agendaDatos?.dia || isoLocal(new Date()), -1); cargarAgenda(); };
+$("#dia-sig").onclick = () => { diaVisto = sumarDias(agendaDatos?.dia || isoLocal(new Date()), 1); cargarAgenda(); };
+$("#dia-titulo").onclick = () => { diaVisto = null; cargarAgenda(); };
+$("#dia-plegar").onclick = () => plegarAgenda(!$("#dia").classList.contains("plegado"));
+try { plegarAgenda(!!localStorage.getItem("agendaPlegada")); } catch {}
+setInterval(pintarAgenda, 30000);   // estados "ahora"/"pasado" y la marca de la hora
+setInterval(cargarAgenda, 300000);  // por si se editó agenda.json a mano
+document.addEventListener("keydown", e => { if (e.key === "Escape" && cfg.segundos_ocultar) cerrarPanel(); });
 $("#panel").addEventListener("mouseenter", () => { ratonEncima = true; });
 $("#panel").addEventListener("mouseleave", () => { ratonEncima = false; });
 
 window.addEventListener("pywebviewready", async () => {
   cfg = { ...cfg, ...(await api().config()) };
+  if (cfg.modo) app.on({ tipo: "modo", modo: cfg.modo });
   $("#palabra").textContent = `«${cfg.palabra}»`;
   ESTADOS.reposo = `Di «${cfg.palabra}» para hablarme`;
+  cargarAgenda();
 });

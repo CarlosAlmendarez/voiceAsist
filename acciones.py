@@ -30,7 +30,7 @@ CLIMA = {0: "despejado", 1: "mayormente despejado", 2: "parcialmente nublado", 3
          95: "con tormenta", 96: "con tormenta y granizo", 99: "con tormenta y granizo"}
 SITIOS = {"youtube": "https://www.youtube.com", "google": "https://www.google.com",
           "gmail": "https://mail.google.com", "correo": "https://mail.google.com",
-          "calendario": "https://calendar.google.com", "whatsapp": "https://web.whatsapp.com",
+          "whatsapp": "https://web.whatsapp.com",
           "netflix": "https://www.netflix.com", "github": "https://github.com",
           "drive": "https://drive.google.com", "maps": "https://maps.google.com",
           "youtube music": "https://music.youtube.com", "musica": "https://music.youtube.com",
@@ -257,20 +257,16 @@ def clima(ciudad: str | None, dia: int, semana: bool = False, lluvia: bool = Fal
 def agenda(motor, dia: date) -> tuple[str, list]:
     """Frase hablada y filas de tabla con los eventos y recordatorios de un día."""
     filas, partes = [], []
-    if CFG.get("calendarios_google"):
-        import calendario
-        eventos, errores = calendario.listar(dia, 1)
-        if errores:
-            partes.append("nada que pueda ver, porque no tengo acceso a tu calendario")
-        for _, ev in eventos:
-            titulo = ev.get("summary") or "un evento sin título"
-            if "date" in ev["start"]:
-                partes.append(titulo)
-                filas.append(["Todo el día", titulo])
-            else:
-                ini = calendario.inicio(ev)
-                partes.append(f"{titulo} a {hora_hablada(ini)}")
-                filas.append([f"{ini:%H:%M}", titulo])
+    import calendario
+    for o in calendario.listar(dia, 1):
+        titulo = o["titulo"]
+        if o["todo_el_dia"]:
+            partes.append(titulo)
+            filas.append(["Todo el día", titulo])
+        else:
+            ini = o["inicio_real"]
+            partes.append(f"{titulo} a {hora_hablada(ini)}")
+            filas.append([f"{ini:%H:%M}", titulo])
     for r in motor.recordatorios:
         if r["cuando"][:10] == dia.isoformat():
             ini = datetime.fromisoformat(r["cuando"])

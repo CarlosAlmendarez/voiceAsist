@@ -30,17 +30,38 @@
       <button class="icono" id="btn-historial" title="Historial">
         <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
       </button>
-      <button class="icono" id="btn-cerrar" title="Minimizar a orbe">
+      <button class="icono" id="btn-cerrar" title="Plegar a orbe">
         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
       </button>
     </header>
+
+    <section id="dia">
+      <div class="dia-cab">
+        <button class="icono chico" id="dia-ant" title="Día anterior">
+          <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <button id="dia-titulo" title="Volver a hoy">
+          <strong id="dia-nombre">Hoy</strong>
+          <span id="dia-fecha"></span>
+        </button>
+        <span id="dia-cuenta"></span>
+        <button class="icono chico" id="dia-sig" title="Día siguiente">
+          <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+        <button class="icono chico" id="dia-plegar" title="Plegar la agenda">
+          <svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg>
+        </button>
+      </div>
+      <div id="dia-siguiente" hidden></div>
+      <ol id="dia-lista"></ol>
+    </section>
 
     <main id="conversacion">
       <div id="bienvenida">
         <div class="orb deco"><i class="anillo"></i><i class="nucleo"></i></div>
         <h1>¿En qué te ayudo?</h1>
         <p>Di <b id="palabra">«asistente»</b> o escribe abajo.<br>
-           Puedo revisar tus proyectos, buscar en la web y mostrarte capturas, código y datos.</p>
+           Por ejemplo: «agrega comida a las 3», «¿qué tengo mañana?»<br>o pregúntame por tus proyectos.</p>
       </div>
     </main>
 

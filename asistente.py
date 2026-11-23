@@ -1,12 +1,16 @@
-"""Asistente de voz con interfaz: orbe flotante que se abre en un panel lateral
-con la respuesta, el progreso en vivo y tarjetas visuales."""
+"""Asistente de voz con interfaz: panel lateral fijo con las actividades del día y
+la conversación (progreso en vivo y tarjetas visuales); se puede plegar a un orbe."""
 
 import ctypes
 import json
+import shutil
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
+from ctypes import wintypes
+from datetime import date
 from pathlib import Path
 
 import keyboard
@@ -19,15 +23,38 @@ from motor import BASE, CFG, Motor, log
 
 TITULO = "Asistente de voz"
 ORBE = 104
-PANEL_ANCHO = 440
+PANEL_ANCHO = CFG.get("ancho_panel", 400)
+PANEL_FIJO = CFG.get("panel_fijo", True)  # reserva su franja de pantalla, como la barra de tareas
 MARGEN = 16
 BARRA_TAREAS = 48
 INICIO = Path.home() / "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/Asistente de voz.lnk"
 
-user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+user32, gdi32, shell32 = ctypes.windll.user32, ctypes.windll.gdi32, ctypes.windll.shell32
 ventana: webview.Window
 m = Motor()
-estado_ui = {"modo": "orbe", "visible": True}
+estado_ui = {"modo": CFG.get("modo_inicial", "panel"), "visible": True, "barra": 0, "encima": True}  # barra = hwnd registrado
+
+
+class APPBARDATA(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND), ("uCallbackMessage", wintypes.UINT),
+                ("uEdge", wintypes.UINT), ("rc", wintypes.RECT), ("lParam", wintypes.LPARAM)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+
+shell32.SHAppBarMessage.argtypes = [wintypes.DWORD, ctypes.POINTER(APPBARDATA)]
+shell32.SHAppBarMessage.restype = ctypes.c_size_t
+user32.MonitorFromWindow.restype = wintypes.HANDLE
+user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.GetForegroundWindow.restype = wintypes.HWND
+ABM_NEW, ABM_REMOVE, ABM_QUERYPOS, ABM_SETPOS, ABE_RIGHT = 0, 1, 2, 3, 2
+BARRA_ANTERIOR = BASE / "modelos" / "panel-barra.txt"  # hwnd de la franja reservada, por si hay un cierre brusco
 
 
 def emitir(evento: dict) -> None:
@@ -74,15 +101,98 @@ def pantalla() -> tuple[int, int]:
     return int(s.width / e), int(s.height / e)
 
 
+def monitor(h: int) -> MONITORINFO:
+    info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    user32.GetMonitorInfoW(user32.MonitorFromWindow(h, 2), ctypes.byref(info))  # 2 = el más cercano
+    return info
+
+
+def barra(h: int, mensaje: int, rc: wintypes.RECT | None = None) -> APPBARDATA:
+    d = APPBARDATA(cbSize=ctypes.sizeof(APPBARDATA), hWnd=h, uEdge=ABE_RIGHT)
+    if rc:
+        d.rc = rc
+    shell32.SHAppBarMessage(mensaje, ctypes.byref(d))
+    return d
+
+
+def soltar_barra() -> None:
+    """Devuelve a Windows la franja reservada por el panel."""
+    if estado_ui["barra"]:
+        barra(estado_ui["barra"], ABM_REMOVE)
+        estado_ui["barra"] = 0
+        BARRA_ANTERIOR.unlink(missing_ok=True)
+
+
+def limpiar_barra_huerfana() -> None:
+    """Si el asistente se cerró a la fuerza, Windows sigue reservando la franja de la
+    ventana muerta: se libera con el identificador que quedó apuntado."""
+    try:
+        viejo = int(BARRA_ANTERIOR.read_text())
+    except (OSError, ValueError):
+        return
+    if viejo and not user32.IsWindow(viejo):
+        barra(viejo, ABM_REMOVE)
+        log("Liberé el espacio que dejó reservado un cierre anterior.")
+    BARRA_ANTERIOR.unlink(missing_ok=True)
+
+
+def acoplar() -> None:
+    """Pega el panel al borde derecho, de arriba abajo del área de trabajo. Con
+    panel_fijo lo registra como barra de escritorio (AppBar): Windows encoge el área
+    de trabajo y las ventanas maximizadas ya no quedan debajo del panel."""
+    h = hwnd()
+    if not h:
+        return
+    ancho = int(PANEL_ANCHO * escala())
+    if PANEL_FIJO and not estado_ui["barra"]:
+        t = monitor(h).rcWork  # medido antes de reservar nada
+        estado_ui["zona"] = (t.top, t.right, t.bottom)
+        barra(h, ABM_NEW)
+        estado_ui["barra"] = h
+        BARRA_ANTERIOR.write_text(str(h))
+    if estado_ui["barra"]:
+        arriba, derecha, abajo = estado_ui["zona"]
+        rc = barra(h, ABM_QUERYPOS, wintypes.RECT(derecha - ancho, arriba, derecha, abajo)).rc
+        rc.left = rc.right - ancho
+        rc = barra(h, ABM_SETPOS, rc).rc
+    else:
+        t = monitor(h).rcWork
+        rc = wintypes.RECT(t.right - ancho, t.top, t.right, t.bottom)
+    user32.SetWindowRgn(h, None, True)  # rectangular: va pegado al borde
+    user32.MoveWindow(h, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, True)
+
+
+def vigilar_pantalla_completa() -> None:
+    """Si otra app ocupa toda la pantalla (video, juego, presentación), el panel deja
+    de estar siempre encima para no taparla; vuelve al salir de pantalla completa."""
+    while True:
+        time.sleep(1.5)
+        try:
+            h = hwnd()
+            fg = user32.GetForegroundWindow()
+            if not h or not fg or fg == h:
+                continue
+            clase = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(fg, clase, 64)
+            r, mon = wintypes.RECT(), monitor(fg).rcMonitor
+            user32.GetWindowRect(fg, ctypes.byref(r))
+            completa = clase.value not in ("Progman", "WorkerW", "Shell_TrayWnd") and \
+                r.left <= mon.left and r.top <= mon.top and r.right >= mon.right and r.bottom >= mon.bottom
+            if completa == estado_ui["encima"]:
+                estado_ui["encima"] = not completa
+                # -1 = HWND_TOPMOST, -2 = HWND_NOTOPMOST; sin mover, cambiar tamaño ni activar
+                user32.SetWindowPos(h, -2 if completa else -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        except Exception as e:
+            log(f"Vigilancia de pantalla completa: {e}")
+
+
 def poner_modo(modo: str) -> None:
     ancho_p, alto_p = pantalla()
     if modo == "panel":
-        alto = alto_p - BARRA_TAREAS - 2 * MARGEN
-        ventana.resize(PANEL_ANCHO, alto)
-        ventana.move(ancho_p - PANEL_ANCHO - MARGEN, MARGEN)
-        recortar(28)
-        threading.Timer(0.3, recortar, (28,)).start()  # por si el tamaño se aplica tarde
+        acoplar()
+        threading.Timer(0.3, acoplar).start()  # por si el tamaño se aplica tarde
     else:
+        soltar_barra()
         ventana.move(ancho_p - ORBE - MARGEN, alto_p - BARRA_TAREAS - ORBE - MARGEN)
         ventana.resize(ORBE, ORBE)
         recortar(ORBE)
@@ -130,8 +240,42 @@ class Api:
             webbrowser.open(url)
 
     def config(self):
-        return {"segundos_ocultar": CFG.get("segundos_ocultar", 60),
-                "palabra": CFG["palabra_activacion"], "atajo": CFG.get("atajo", "ctrl+alt+a")}
+        return {"segundos_ocultar": CFG.get("segundos_ocultar", 0),
+                "palabra": CFG["palabra_activacion"], "atajo": CFG.get("atajo", "ctrl+alt+a"),
+                "modo": estado_ui["modo"]}
+
+    def agenda(self, dia=None):
+        """Eventos y recordatorios de un día (AAAA-MM-DD; hoy por defecto) para el panel."""
+        import calendario
+        d = date.fromisoformat(dia) if dia else date.today()
+        items = []
+        for o in calendario.listar(d, 1):
+            ini, fin = o["inicio_real"], o["fin_real"]
+            items.append({"id": o["id"], "tipo": "recordatorio" if o.get("recordatorio") else "evento",
+                          "titulo": o["titulo"], "todo_el_dia": o["todo_el_dia"],
+                          "inicio": None if o["todo_el_dia"] else ini.strftime("%Y-%m-%dT%H:%M"),
+                          "fin": None if o["todo_el_dia"] else fin.strftime("%Y-%m-%dT%H:%M"),
+                          "lugar": o.get("lugar", ""), "nota": o.get("descripcion", ""),
+                          "repetir": o.get("repetir", "")})
+        for r in m.recordatorios:
+            if r["cuando"][:10] == d.isoformat():
+                items.append({"id": r["id"], "tipo": "voz", "titulo": r["texto"], "todo_el_dia": False,
+                              "inicio": r["cuando"][:16], "fin": None, "lugar": "", "nota": "", "repetir": ""})
+        items.sort(key=lambda i: (not i["todo_el_dia"], i["inicio"] or ""))
+        return {"dia": d.isoformat(), "hoy": date.today().isoformat(), "items": items}
+
+    def borrar(self, item_id, tipo):
+        """Quitar desde el panel (la interfaz pide confirmar antes)."""
+        if tipo == "voz":
+            m.cancelar_recordatorios([item_id])
+        else:
+            import calendario
+            try:
+                ev = calendario.borrar_evento(item_id)
+                log(f"Agenda: borrado desde el panel {ev['titulo']} [{item_id}]")
+            except KeyError:
+                pass
+        emitir({"tipo": "agenda"})
 
 
 # ---------- bandeja del sistema ----------
@@ -148,7 +292,13 @@ def dibujar_icono() -> Image.Image:
 
 def alternar_visible(*_):
     estado_ui["visible"] = not estado_ui["visible"]
-    (ventana.show if estado_ui["visible"] else ventana.hide)()
+    if estado_ui["visible"]:
+        ventana.show()
+        if estado_ui["modo"] == "panel":
+            acoplar()
+    else:
+        soltar_barra()  # oculto no debe seguir quitando espacio a las demás ventanas
+        ventana.hide()
 
 
 def abrir_panel(*_):
@@ -169,6 +319,7 @@ def alternar_inicio(*_):
 
 
 def salir(*_):
+    soltar_barra()
     icono.stop()
     ventana.destroy()
 
@@ -186,7 +337,9 @@ icono = pystray.Icon("asistente", dibujar_icono(), TITULO, menu=pystray.Menu(
 
 def al_cargar():
     ocultar_de_barra_de_tareas()
-    poner_modo("orbe")
+    limpiar_barra_huerfana()
+    poner_modo(CFG.get("modo_inicial", "panel"))
+    threading.Thread(target=vigilar_pantalla_completa, daemon=True).start()
     try:
         keyboard.add_hotkey(CFG.get("atajo", "ctrl+alt+a"), abrir_panel)
     except Exception as e:
@@ -196,6 +349,8 @@ def al_cargar():
 
 if __name__ == "__main__":
     motor.emitir = emitir
+    # WebView2 guarda en caché index.html/app.js: tras actualizar el asistente mostraría la interfaz vieja
+    shutil.rmtree(BASE / "modelos" / "webview" / "EBWebView" / "Default" / "Cache", ignore_errors=True)
     ventana = webview.create_window(
         TITULO, str(BASE / "ui" / "index.html"), js_api=Api(),
         width=ORBE, height=ORBE, min_size=(ORBE, ORBE), frameless=True, on_top=True, resizable=False,
@@ -203,5 +358,8 @@ if __name__ == "__main__":
     )
     ventana.events.loaded += al_cargar
     icono.run_detached()
-    webview.start(private_mode=False, storage_path=str(BASE / "modelos" / "webview"))
-    icono.stop()
+    try:
+        webview.start(private_mode=False, storage_path=str(BASE / "modelos" / "webview"))
+    finally:
+        soltar_barra()  # devuelve el espacio reservado aunque algo falle
+        icono.stop()
