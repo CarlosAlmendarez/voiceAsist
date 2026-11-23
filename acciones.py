@@ -285,6 +285,71 @@ def tabla_agenda(filas: list, titulo: str) -> list:
     return [{"tipo": "tabla", "titulo": titulo, "columnas": ["Hora", "Qué"], "filas": filas}] if filas else []
 
 
+# ---------- servicios (vigía) ----------
+SERVICIOS = re.compile(
+    r"(como|que tal) (estan|andan|van) (mis|los) (servicios|servidores|sitios)( hoy| ahora)?|"
+    r"(hay|tengo) (algo|algun servicio|algun servidor|algun sitio) caido( ahora)?|"
+    r"(dame el |cual es el |como esta el )?estado de (mis|los) (servicios|servidores)|"
+    r"(esta|estan) todo arriba|esta todo bien con (mis|los) (servicios|servidores)|se cayo algo")
+
+
+def nombres_hablados(nombres: list[str], maximo: int = 3) -> str:
+    if len(nombres) <= maximo:
+        return lista(nombres)
+    return f"{', '.join(nombres[:maximo])} y {len(nombres) - maximo} más"
+
+
+def servicios() -> dict:
+    """«¿Cómo están mis servicios?» → frase + tabla con lo que no está arriba."""
+    import vigia
+    try:
+        e = vigia.estado()
+    except vigia.ErrorVigia as err:
+        return resp(f"{err}.")
+    malos = vigia.no_arriba(e)
+    total = e.get("total") or len(e.get("monitores", []))
+    if not malos:
+        return resp(f"Todo arriba: los {total} servicios responden.")
+    n = len(malos)
+    todos_caidos = all(m.get("estado") == "down" for m in malos)
+    que = ("caído" if todos_caidos else "con problemas") if n == 1 else ("caídos" if todos_caidos else "con problemas")
+    voz = f"Hay {n} servicio{'s' if n != 1 else ''} {que}: {nombres_hablados([m['nombre'] for m in malos])}."
+    filas = [[vigia.nombre_monitor(m), m.get("estado_es") or m.get("estado", ""),
+              f"{vigia.hora_corta(vigia.leer_hora(m.get('desde')))} ({m.get('hace', '?')})",
+              str(m.get("msg") or "")[:80]] for m in malos]
+    return resp(voz, tarjetas=[{"tipo": "tabla", "titulo": f"Servicios con problemas ({n} de {total})",
+                                "columnas": ["Servicio", "Estado", "Desde", "Detalle"], "filas": filas}])
+
+
+def novedades_servicios(desde: datetime | None) -> tuple[str, list]:
+    """Una frase (o "") con las caídas que EMPEZARON desde `desde`, y su tabla."""
+    import vigia
+    if not desde or not vigia.configurado():
+        return "", []
+    try:
+        r = vigia.incidentes(desde, datetime.now().replace(microsecond=0))
+    except vigia.ErrorVigia as err:
+        log(f"Resumen del día sin servicios: {err}")
+        return "", []
+    limite = desde.astimezone()
+    nuevos = [i for i in r.get("incidentes", []) if (vigia.leer_hora(i.get("inicio")) or limite) >= limite]
+    if not nuevos:
+        return "", []
+    siguen = [i for i in nuevos if i.get("en_curso")]
+    nombres = list(dict.fromkeys(i["monitor"] for i in nuevos))
+    voz = (f"Mientras no estabas hubo {len(nuevos)} caída{'s' if len(nuevos) != 1 else ''} "
+           + (f"({lista(nombres)})" if len(nombres) <= 3 else f"en {len(nombres)} servicios"))
+    voz += (": ya volvió todo." if not siguen else
+            f"; {'sigue caído' if len(siguen) == 1 else f'siguen caídos {len(siguen)}'}"
+            + (f" {siguen[0]['monitor']}." if len(siguen) == 1 else "."))
+    filas = [[vigia.nombre_monitor(i), vigia.hora_corta(vigia.leer_hora(i.get("inicio"))),
+              "sigue caído" if i.get("en_curso") else vigia.hora_corta(vigia.leer_hora(i.get("fin"))),
+              i.get("duracion") or vigia.duracion(i.get("duracion_s", 0))] for i in nuevos]
+    titulo = "Caídas mientras no estabas" + (f" (últimas 20 de {len(filas)})" if len(filas) > 20 else "")
+    return voz, [{"tipo": "tabla", "titulo": titulo,
+                  "columnas": ["Servicio", "Cayó", "Volvió", "Duración"], "filas": filas[-20:]}]
+
+
 # ---------- reconocimiento de frases ----------
 def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
     t = normalizar(texto)
@@ -383,8 +448,17 @@ def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
         except Exception as e:
             log(f"Clima no disponible: {e}")
             voz_clima = ""
-        return resp(f"{saludo}Hoy es {fecha_hablada(ahora.date())}. {voz_clima} {voz_agenda}".replace("  ", " "),
-                    tarjetas=tabla_agenda(filas, "Hoy"))
+        # actividad_previa = la ANTERIOR a esta conversación (atender() ya registró la actual)
+        voz_servicios, tabla_servicios = novedades_servicios(getattr(motor, "actividad_previa", None))
+        return resp(f"{saludo}Hoy es {fecha_hablada(ahora.date())}. {voz_clima} {voz_agenda} {voz_servicios}"
+                    .replace("  ", " ").strip(),
+                    tarjetas=tabla_agenda(filas, "Hoy") + tabla_servicios)
+
+    # estado de los servicios (vigía)
+    if SERVICIOS.fullmatch(t):
+        import vigia
+        if vigia.configurado():
+            return servicios()
     m = re.fullmatch(r"(que|que cosas) tengo( agendado| en (la|mi) agenda| en el calendario| para)* (hoy|manana)"
                      r"( en (la|mi) agenda| en el calendario| agendado)?|(mi )?agenda (de|para) (hoy|manana)|"
                      r"que hay (hoy|manana) en (la|mi) agenda", t)
