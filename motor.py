@@ -57,6 +57,9 @@ ULTIMA_ACTIVIDAD = BASE / "ultima_actividad.json"  # cuándo usó el usuario el 
 ALERTAS = BASE / "alertas.json"  # alertas del vigía ya vistas, reconocidas y resueltas
 AVISADOS = BASE / "avisados.json"  # avisos de la agenda ya dichos (para no repetirlos al reiniciar)
 SIN_VIGIA = "vigia:sin_respuesta"  # id de la alerta propia cuando el vigía no contesta
+# lo que se guarda de cada alerta de /api/alertas (motivo puede faltar; host/hallazgo solo en las de seguridad)
+CAMPOS_ALERTA = ("tipo", "origen", "severidad", "monitor", "host", "hallazgo", "grupo", "desde", "duracion",
+                 "motivo", "msg", "texto", "caido_en_silencio")
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 
 FORMATO = """Responde SIEMPRE y SOLO con un objeto JSON válido (sin texto antes ni después, sin ```), con esta forma:
@@ -306,7 +309,7 @@ def describir_herramienta(nombre: str, e: dict) -> str:
         if "calendario.py" in e.get("command", ""):
             return "Revisando tu calendario"
         if "vigia.py" in e.get("command", ""):
-            return "Revisando tus servicios"
+            return "Revisando la seguridad" if "vigia.py seguridad" in e.get("command", "") else "Revisando tus servicios"
         return f"Ejecutando {e.get('command', '')[:50]}"
     if nombre in ("Edit", "MultiEdit", "NotebookEdit"):
         return f"Editando {Path(e.get('file_path') or e.get('notebook_path') or '').name}"
@@ -717,10 +720,11 @@ Para cancelar alguno, añade "cancelar_recordatorios": ["id", ...] y confírmalo
 
 Servicios: el usuario monitorea sus servidores y sitios con Uptime Kuma a través del «vigía» (solo lectura). Para cualquier pregunta sobre si sus servicios, servidores, sitios o APIs están arriba, caídos o tuvieron problemas, ejecuta con Bash exactamente uno de:
   {VIGIA} estado [--todos]        (qué NO está arriba ahora; --todos lista todos)
-  {VIGIA} alertas                 (alertas activas: critico o atencion)
+  {VIGIA} alertas                 (alertas activas: critico o atencion; origen servicio, salud o seguridad)
+  {VIGIA} seguridad               (seguridad de cada servidor: hallazgos, intentos SSH, baneos, parches, disco, TLS, certificados CSD)
   {VIGIA} incidentes --desde hoy|ayer|AAAA-MM-DD[THH:MM] [--hasta AAAA-MM-DD[THH:MM]] [--dias N]   (caídas en un rango; horas locales; --hasta es exclusivo)
 Rangos: "el fin de semana" = del sábado 00:00 al lunes 00:00 más recientes, es decir {fin_semana}. "Anoche", "hoy", "ayer", "esta semana": calcula tú el rango. {ausencia} "Mientras no estaba" o "desde la última vez" = desde ese momento hasta ahora (si fue hace menos de 2 horas o no se sabe, pregunta el rango). "En vacaciones" u otro periodo sin fechas claras: pregunta el rango en "voz" en vez de adivinarlo.
-En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sábado se cayó la API de facturas dos horas; ya volvió"). Si no hubo incidentes, dilo en una frase ("Todo estuvo arriba el fin de semana"). El detalle va en una tarjeta "tabla" con columnas Servicio, Cayó, Volvió, Duración (Volvió = "sigue caído" si no ha vuelto). Si la herramienta responde "No pude contactar al vigía", dilo así; nunca inventes el estado."""
+En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sábado se cayó la API de facturas dos horas; ya volvió"). Si no hubo incidentes, dilo en una frase ("Todo estuvo arriba el fin de semana"). El detalle va en una tarjeta "tabla" con columnas Servicio, Cayó, Volvió, Duración (Volvió = "sigue caído" si no ha vuelto). Cuando una alerta, incidente o hallazgo traiga "motivo", menciónalo en "voz" (en pocas palabras) y ponlo en la tabla. Para "¿cómo está la seguridad?", "¿algo raro?", intentos de acceso o parches usa {VIGIA} seguridad (y "incidentes" para los eventos de seguridad de un periodo); resume por servidor y advierte si un host no tiene datos recientes. Si la herramienta responde "No pude contactar al vigía", dilo así; nunca inventes el estado."""
 
     def herramientas(self) -> str:
         permitidas = f"{CFG['herramientas_permitidas']},Bash({CALENDARIO} eventos:*)"
@@ -1049,8 +1053,7 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
                               "no_arriba": len(vigia.no_arriba(estado)), "revisado": ahora}
             activas = {x["id"]: x for x in respuesta.get("alertas", []) if x.get("id")}
             for aid, x in activas.items():
-                datos = {k: x.get(k) for k in ("tipo", "severidad", "monitor", "grupo", "desde",
-                                                "duracion", "msg", "texto", "caido_en_silencio")}
+                datos = {k: x.get(k) for k in CAMPOS_ALERTA}
                 previa = self.alertas.get(aid)
                 if previa is None:
                     self.alertas[aid] = {"id": aid, **datos, "vista": ahora, "reconocida": None, "resuelta": None}
@@ -1109,8 +1112,7 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
 
     @staticmethod
     def alerta_publica(x: dict) -> dict:
-        return {k: x.get(k) for k in ("id", "tipo", "severidad", "monitor", "grupo", "desde", "duracion",
-                                       "msg", "texto", "caido_en_silencio", "reconocida", "resuelta")}
+        return {k: x.get(k) for k in ("id", *CAMPOS_ALERTA, "reconocida", "resuelta")}
 
     def _notificar(self, cambios: list[tuple[str, dict]]) -> None:
         """Avisa a la interfaz y al iPhone, y prepara la voz de las críticas nuevas."""
@@ -1146,19 +1148,39 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
         recientes = [x for x in nuevas if not antes_de_arrancar(x)]
         frases = []
         if fuera:  # surgieron con el asistente apagado: una sola frase agrupada
-            nombres = nombres_hablados([x.get("monitor") or x.get("texto") for x in fuera])
+            nombres = nombres_hablados([self.nombre_hablado(x) for x in fuera])
             frases.append(f"Mientras estabas fuera hubo un problema crítico: {nombres}." if len(fuera) == 1
                           else f"Mientras estabas fuera hubo {len(fuera)} problemas críticos: {nombres}.")
         if len(recientes) == 1:
-            x = recientes[0]
-            frases.append(f"Alerta crítica: {x['monitor']} está caído." if x.get("tipo") == "caido" and x.get("monitor")
-                          else f"Alerta crítica: {x.get('texto')}.")
+            frases.append(self.frase_critica(recientes[0]))
         elif recientes:
             frases.append(f"Hay {len(recientes)} alertas críticas: "
-                          f"{lista([x.get('monitor') or x.get('texto') for x in recientes][:3])}"
+                          f"{lista([self.nombre_hablado(x) for x in recientes][:3])}"
                           + (f" y {len(recientes) - 3} más." if len(recientes) > 3 else "."))
         with self._bloqueo_alertas:
             self._por_decir += frases
+
+    @staticmethod
+    def nombre_hablado(x: dict) -> str:
+        """Para la voz: el monitor, o «seguridad de node» (primer tramo del host), o el texto."""
+        if x.get("monitor"):
+            return x["monitor"]
+        if x.get("host"):
+            host = str(x["host"]).split(".")[0]
+            return f"seguridad de {host}" if x.get("origen") == "seguridad" else host
+        return x.get("texto") or "una alerta"
+
+    @staticmethod
+    def frase_critica(x: dict) -> str:
+        """Una alerta crítica en voz, con el motivo si el vigía lo da."""
+        motivo = str(x.get("motivo") or "").strip()
+        if x.get("tipo") == "caido" and x.get("monitor"):
+            return f"Alerta crítica: {x['monitor']} está caído" + (f": {motivo}." if motivo else ".")
+        if x.get("origen") == "seguridad" and x.get("host"):
+            # el texto viene como "host · seguridad: qué pasa"; sin motivo se usa lo que va tras los dos puntos
+            que = motivo or str(x.get("texto") or "").split(": ", 1)[-1]
+            return f"Alerta crítica de seguridad en {str(x['host']).split('.')[0]}: {que.rstrip('.')}."
+        return f"Alerta crítica: {str(x.get('texto') or '').rstrip('.')}" + (f": {motivo}." if motivo else ".")
 
     def puede_hablar_alertas(self) -> bool:
         return bool(CFG.get("alertas_voz", True)) and not self.silenciado and not en_horario_silencioso()
