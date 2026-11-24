@@ -857,6 +857,10 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
     def _atender(self, texto: str) -> bool:
         log(f"Tú: {texto}")
         emitir({"tipo": "pregunta", "texto": texto})
+        texto, directa = self.comando(texto)
+        if directa is not None:
+            self.responder(texto, directa)
+            return True
         t = texto.lower()
         if self.tareas_activas and CANCELAR_TAREA.search(t):
             n = self.cancelar_tarea()
@@ -1236,6 +1240,19 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
     def novedades(self, desde: int) -> dict:
         return {"n": self.n_buzon, "eventos": [e for e in self.buzon if e["n"] > desde]}
 
+    def comando(self, texto: str) -> tuple[str, dict | None]:
+        """Comandos escritos con "/" (acciones.COMANDOS): devuelve la frase equivalente, o una
+        respuesta directa para /ayuda, errores de uso y /cancelar sin tareas."""
+        if not texto.lstrip().startswith("/"):
+            return texto, None
+        import acciones
+        frase, directa = acciones.expandir_comando(texto)
+        if directa is None and frase == "cancela la tarea" and not self.tareas_activas:
+            directa = acciones.resp("No hay ninguna tarea en marcha.")
+        if directa is None:
+            log(f"Comando {texto.strip()} → «{frase}»")
+        return frase, directa
+
     def atender_remoto(self, texto: str) -> dict:
         """Como atender(), pero devuelve la respuesta en vez de hablarla en la PC. Las
         confirmaciones llegan después por confirmar_remoto() o con un «sí» escrito o dicho."""
@@ -1248,6 +1265,10 @@ En "voz", un resumen corto: qué cayó, cuánto tiempo y si ya volvió ("El sáb
                 if v is not None:
                     return self.confirmar_remoto(v)
                 self.pendiente_remoto = None  # cambió de tema: se descarta lo pendiente
+            texto, directa = self.comando(texto)
+            if directa is not None:
+                return directa
+            t = texto.lower()
             if self.tareas_activas and CANCELAR_TAREA.search(t):
                 n = self.cancelar_tarea()
                 return {"voz": "Listo, cancelé la tarea." if n == 1 else f"Listo, cancelé {n} tareas.",

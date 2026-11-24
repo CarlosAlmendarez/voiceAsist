@@ -272,6 +272,11 @@ class Api:
         """Botón «Visto» del panel."""
         return m.reconocer_alerta(str(alerta_id))
 
+    def comandos(self):
+        """Sugerencias al escribir "/" en la caja de texto: [[comando, descripción], ...]."""
+        import acciones
+        return acciones.lista_comandos()
+
     def borrar(self, item_id, tipo):
         """Quitar desde el panel (la interfaz pide confirmar antes)."""
         if tipo == "voz":

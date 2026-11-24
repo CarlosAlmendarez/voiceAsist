@@ -251,6 +251,26 @@ async function revisarNovedades(inicial = false) {
 setInterval(() => { if (!document.hidden) revisarNovedades(); }, 1500);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) revisarNovedades(); });
 revisarNovedades(true);
+api("/api/comandos").then(c => sugerirComandos($("#entrada"), c)).catch(() => {});
+
+// sugerencias de comandos al escribir "/" (la lista viene de acciones.COMANDOS)
+function sugerirComandos(entrada, comandos) {
+  const lista = document.createElement("datalist");
+  lista.id = "comandos";
+  for (const [uso, que] of comandos) {
+    const nombre = uso.split(" ")[0];
+    const op = document.createElement("option");
+    op.value = nombre + (uso !== nombre ? " " : "");
+    op.label = `${uso.slice(nombre.length).trim()} — ${que}`.replace(/^ — /, "");
+    lista.appendChild(op);
+  }
+  document.body.appendChild(lista);
+  // solo con "/" al principio: si no, sugeriría comandos al escribir preguntas normales
+  entrada.addEventListener("input", () => {
+    if (entrada.value.startsWith("/")) entrada.setAttribute("list", "comandos");
+    else entrada.removeAttribute("list");
+  });
+}
 
 /* ---------- hablar: mantener pulsado, o tocar para empezar y otra vez para enviar ---------- */
 async function empezarGrabacion() {

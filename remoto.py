@@ -123,6 +123,14 @@ def reconocer():
     return respuesta_json({"ok": motor.reconocer_alerta(aid)})
 
 
+@app.get("/api/comandos")
+@protegido
+def comandos():
+    """Sugerencias al escribir "/" en la caja de texto."""
+    import acciones
+    return respuesta_json(acciones.lista_comandos())
+
+
 @app.get("/api/voz")
 @protegido
 def voz():

@@ -418,6 +418,105 @@ def novedades_servicios(desde: datetime | None, vigia_caido: bool = False) -> tu
 
 
 # ---------- reconocimiento de frases ----------
+# ---------- comandos escritos con "/" ----------
+# nombre → (argumentos, qué hace); se traducen a la frase que ya entiende atajo() o el motor
+COMANDOS = {
+    "ayuda": ("", "esta lista"),
+    "hora": ("", "la hora"),
+    "fecha": ("", "la fecha de hoy"),
+    "dia": ("", "resumen del día (agenda, clima y novedades de servicios)"),
+    "agenda": ("[mañana]", "lo que tienes hoy o mañana"),
+    "clima": ("[ciudad] [mañana|semana]", "el clima"),
+    "servicios": ("", "estado de tus servicios"),
+    "seguridad": ("", "seguridad de tus servidores"),
+    "volumen": ("[0-100|sube|baja]", "volumen de la PC"),
+    "silencio": ("", "silencia la PC"),
+    "sonido": ("", "quita el silencio"),
+    "pausa": ("", "pausa o reanuda lo que suena"),
+    "siguiente": ("", "siguiente canción"),
+    "anterior": ("", "canción anterior"),
+    "musica": ("[qué]", "pone música en YouTube Music"),
+    "podcast": ("[cuál]", "último episodio de un podcast"),
+    "abrir": ("<app o sitio>", "abre una app o un sitio"),
+    "temporizador": ("<n> [min|seg|h]", "temporizador (minutos si no dices nada)"),
+    "bloquear": ("", "bloquea la pantalla"),
+    "nueva": ("", "empieza una conversación nueva con Claude"),
+    "cancelar": ("", "cancela la tarea en marcha"),
+}
+ALIAS_COMANDOS = {"h": "hora", "help": "ayuda", "comandos": "ayuda", "manana": "agenda manana",
+                  "hoy": "agenda", "tiempo": "clima", "vol": "volumen", "mute": "silencio", "play": "pausa",
+                  "timer": "temporizador", "alarma": "temporizador", "bloquea": "bloquear", "abre": "abrir",
+                  "buenosdias": "dia", "resumen": "dia", "srv": "servicios", "seg": "seguridad"}
+
+
+def lista_comandos() -> list[list[str]]:
+    """[["/clima [ciudad] [mañana|semana]", "el clima"], ...] para /ayuda y las sugerencias."""
+    return [[f"/{n}" + (f" {a}" if a else ""), d] for n, (a, d) in COMANDOS.items()]
+
+
+def ayuda_comandos() -> dict:
+    filas = lista_comandos()
+    return resp("Estos son los comandos con barra.", tarjetas=[{
+        "tipo": "tabla", "titulo": "Comandos", "columnas": ["Comando", "Qué hace"], "filas": filas}])
+
+
+def expandir_comando(texto: str) -> tuple[str, dict | None]:
+    """"/clima monterrey" → ("clima en monterrey", None). Si no es un comando devuelve el
+    texto tal cual; para /ayuda o un comando desconocido, (texto, respuesta)."""
+    crudo = texto.strip()
+    if not crudo.startswith("/"):
+        return texto, None
+    partes = normalizar(crudo[1:]).split()
+    if not partes:
+        return texto, ayuda_comandos()
+    nombre, args = partes[0], partes[1:]
+    if nombre in ALIAS_COMANDOS:
+        alias = ALIAS_COMANDOS[nombre].split()
+        nombre, args = alias[0], alias[1:] + args
+    resto = " ".join(args)
+    if nombre == "ayuda":
+        return texto, ayuda_comandos()
+    if nombre == "agenda":
+        return ("que tengo manana" if "manana" in args else "que tengo hoy"), None
+    if nombre == "clima":
+        cuando = " manana" if "manana" in args else " esta semana" if "semana" in args else ""
+        ciudad = " ".join(a for a in args if a not in ("manana", "semana", "hoy"))
+        return f"clima{f' en {ciudad}' if ciudad else ''}{cuando}", None
+    if nombre == "volumen":
+        if not args:
+            return "sube el volumen", None
+        if re.fullmatch(r"\d{1,3}%?", args[0]):
+            return f"pon el volumen al {args[0].rstrip('%')}", None
+        if args[0] in ("sube", "+", "mas", "subir"):
+            return "sube el volumen", None
+        if args[0] in ("baja", "-", "menos", "bajar"):
+            return "baja el volumen", None
+        return texto, resp("Usa /volumen con un número del 0 al 100, «sube» o «baja».")
+    if nombre == "musica":
+        return (f"pon musica de {resto}" if resto else "pon musica"), None
+    if nombre == "podcast":
+        return (f"pon el podcast de {resto}" if resto else "abre podcasts"), None
+    if nombre == "abrir":
+        if not resto:
+            return texto, resp("Dime qué abrir, por ejemplo /abrir gmail.")
+        return f"abre {resto}", None
+    if nombre == "temporizador":
+        m = re.fullmatch(r"(\d+)\s*(s|seg|segundos?|m|min|minutos?|h|hr|horas?)?", resto)
+        if not m:
+            return texto, resp("Usa /temporizador con un número, por ejemplo /temporizador 10 o /temporizador 30 seg.")
+        u = m.group(2) or "min"
+        unidad = "segundos" if u.startswith("s") else "horas" if u.startswith("h") else "minutos"
+        return f"pon un temporizador de {m.group(1)} {unidad if m.group(1) != '1' else unidad[:-1]}", None
+    fijas = {"hora": "que hora es", "fecha": "que dia es hoy", "dia": "buenos dias",
+             "servicios": "como estan mis servicios", "seguridad": "como esta la seguridad",
+             "silencio": "silencia el sonido", "sonido": "quita el silencio", "pausa": "pausa",
+             "siguiente": "siguiente", "anterior": "anterior", "bloquear": "bloquea la pantalla",
+             "nueva": "nueva conversación", "cancelar": "cancela la tarea"}
+    if nombre in fijas:
+        return fijas[nombre], None
+    return texto, resp(f"No conozco el comando /{nombre}. Escribe /ayuda para ver la lista.")
+
+
 def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
     t = normalizar(texto)
     if len(t.split()) > 12:

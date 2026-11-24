@@ -607,4 +607,24 @@ window.addEventListener("pywebviewready", async () => {
   ESTADOS.reposo = `Di «${cfg.palabra}» para hablarme`;
   cargarAgenda();
   cargarServicios();
+  try { sugerirComandos($("#entrada"), await api().comandos()); } catch {}
 });
+
+// sugerencias de comandos al escribir "/" (la lista viene de acciones.COMANDOS)
+function sugerirComandos(entrada, comandos) {
+  const lista = document.createElement("datalist");
+  lista.id = "comandos";
+  for (const [uso, que] of comandos) {
+    const nombre = uso.split(" ")[0];
+    const op = document.createElement("option");
+    op.value = nombre + (uso !== nombre ? " " : "");
+    op.label = `${uso.slice(nombre.length).trim()} — ${que}`.replace(/^ — /, "");
+    lista.appendChild(op);
+  }
+  document.body.appendChild(lista);
+  // solo con "/" al principio: si no, sugeriría comandos al escribir preguntas normales
+  entrada.addEventListener("input", () => {
+    if (entrada.value.startsWith("/")) entrada.setAttribute("list", "comandos");
+    else entrada.removeAttribute("list");
+  });
+}
