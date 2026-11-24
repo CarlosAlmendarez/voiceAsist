@@ -387,6 +387,116 @@ def seguridad() -> dict:
                                 "columnas": ["Host", "Estado", "Hallazgos", "Datos"], "filas": filas}])
 
 
+SUCESOS = re.compile(
+    r"(que (paso|ha pasado) |(hubo )?(algo|sucesos|novedades|incidentes) (importantes? |relevantes? )?)"
+    r"(con|en) (mis|los) (servicios|servidores)( en)?( las)? ultimas (?P<h1>\d{1,3}) horas|"
+    r"(que (paso|ha pasado) |(hubo )?(algo|sucesos|novedades) (importantes? |relevantes? )?)en las ultimas (?P<h2>\d{1,3}) horas"
+    r"( con| en) (mis|los) (servicios|servidores)")
+MINUTOS_CAIDA_IMPORTANTE = 5  # caídas más cortas (y no críticas, y ya resueltas) cuentan como «breves»
+
+
+def sucesos(horas: int = 24) -> dict:
+    """«/sucesos [horas]»: lo importante de las últimas N horas (caídas, seguridad, salud y
+    alertas críticas activas) en una frase, más una tabla; si no hubo nada relevante, lo dice."""
+    import vigia
+    horas = max(1, min(int(horas), 168))
+    hasta = datetime.now().replace(microsecond=0)
+    desde = hasta - timedelta(hours=horas)
+    try:
+        r = vigia.incidentes(desde, hasta)
+        activas = vigia.alertas()
+    except vigia.ErrorVigia as err:
+        return resp(f"{err}.")
+    periodo = "en la última hora" if horas == 1 else f"en las últimas {horas} horas"
+    limite = desde.astimezone()
+
+    # caídas: las que tocaron el periodo; «importantes» = críticas, en curso o de ≥ 5 min
+    caidas = r.get("incidentes") or []
+    importantes = [i for i in caidas if i.get("critico") or i.get("en_curso")
+                   or (i.get("duracion_s") or 0) >= MINUTOS_CAIDA_IMPORTANTE * 60]
+    breves = len(caidas) - len(importantes)
+    siguen = [i for i in caidas if i.get("en_curso")]
+
+    # eventos de seguridad y salud del periodo (los informativos van solo a la tabla)
+    def relevantes(clave):
+        return [e for e in r.get(clave) or [] if e.get("nivel") in ("critico", "atencion")]
+    seg, salud = relevantes("eventos_seguridad"), relevantes("eventos_salud")
+    criticas_ahora = [a for a in activas.get("alertas", []) if a.get("severidad") == "critico"]
+
+    corto = lambda h: str(h or "").split(".")[0]
+    frases = []
+    if importantes:
+        # agrupadas por grupo: una caída general de 30 servicios es un solo suceso
+        grupos = {}
+        for i in importantes:
+            grupos.setdefault(corto(i.get("grupo")) or i.get("monitor"), []).append(i)
+        partes = []
+        for g, lista_g in sorted(grupos.items(), key=lambda kv: -len(kv[1]))[:3]:
+            mayor = max(lista_g, key=lambda i: i.get("duracion_s") or 0)
+            dur = mayor.get("duracion") or vigia.duracion(mayor.get("duracion_s") or 0)
+            if len(lista_g) == 1:
+                partes.append(f"{mayor.get('monitor')} {'lleva' if mayor.get('en_curso') else 'estuvo'} caído {dur}"
+                              + (f" ({mayor['motivo']})" if mayor.get("motivo") else ""))
+            else:
+                partes.append(f"en {g} cayeron {len(lista_g)} servicios, hasta {dur}")
+        resto = len(grupos) - 3
+        frases.append(f"hubo {len(importantes)} caída{'s' if len(importantes) != 1 else ''} importante"
+                      f"{'s' if len(importantes) != 1 else ''}: " + "; ".join(partes)
+                      + ("; y más en otro grupo" if resto == 1 else f"; y más en otros {resto} grupos" if resto > 1 else "")
+                      + ".")
+        dichos = " ".join(partes)  # los que ya se nombraron con «lleva caído» no se repiten
+        faltan = [i for i in siguen if f"{i.get('monitor')} lleva caído" not in dichos]
+        if faltan:
+            frases.append(f"Sigue{'n' if len(faltan) != 1 else ''} caído{'s' if len(faltan) != 1 else ''} "
+                          f"{nombres_hablados([i.get('monitor') for i in faltan])}.")
+        elif not siguen:
+            frases.append("Ya volvió todo.")
+    for eventos, nombre in ((seg, "seguridad"), (salud, "salud")):
+        if eventos:
+            crit = sum(1 for e in eventos if e.get("nivel") == "critico")
+            hosts = list(dict.fromkeys(corto(e.get("host")) for e in eventos if e.get("host")))
+            frases.append(f"Hubo {len(eventos)} aviso{'s' if len(eventos) != 1 else ''} de {nombre}"
+                          + (f", {crit} crítico{'s' if crit != 1 else ''}" if crit else "")
+                          + (f", en {lista(hosts)}" if hosts else "") + ".")
+    nuevas_criticas = [a for a in criticas_ahora
+                       if not any(a.get("monitor") and a.get("monitor") == i.get("monitor") for i in siguen)]
+    if nuevas_criticas:
+        frases.append(f"Ahora mismo hay {len(nuevas_criticas)} alerta{'s' if len(nuevas_criticas) != 1 else ''} "
+                      f"crítica{'s' if len(nuevas_criticas) != 1 else ''} activa{'s' if len(nuevas_criticas) != 1 else ''}.")
+    if not frases:
+        voz = f"Nada relevante {periodo}: todo estuvo arriba y no hubo avisos de seguridad" \
+              + (f"; solo {breves} caída{'s' if breves != 1 else ''} breve{'s' if breves != 1 else ''} de menos de "
+                 f"{MINUTOS_CAIDA_IMPORTANTE} minutos." if breves else ".")
+    else:
+        voz = f"{periodo[0].upper()}{periodo[1:]}" + (": " if importantes else " ningún servicio se cayó. ") \
+              + " ".join(frases) \
+              + (f" Además hubo {breves} caída{'s' if breves != 1 else ''} breve{'s' if breves != 1 else ''}." if breves else "")
+
+    # tabla: todo lo del periodo, lo más reciente primero
+    filas = []
+    for i in caidas:
+        ini = vigia.leer_hora(i.get("inicio"))
+        estado = "sigue caído" if i.get("en_curso") else f"volvió {vigia.hora_corta(vigia.leer_hora(i.get('fin')))}"
+        detalle = f"{i.get('duracion') or vigia.duracion(i.get('duracion_s') or 0)}, {estado}" \
+                  + (" · crítico" if i.get("critico") else "") \
+                  + (f" · {i['motivo']}" if i.get("motivo") else "")
+        filas.append((ini or limite, ["servicio", vigia.nombre_monitor(i), detalle]))
+    for clave, origen in (("eventos_seguridad", "seguridad"), ("eventos_salud", "salud")):
+        for e in r.get(clave) or []:
+            filas.append((vigia.leer_hora(e.get("hora")) or limite,
+                          [origen, f"{e.get('host') or ''}: {e.get('texto') or e.get('clave')}".strip(": "),
+                           vigia.NIVELES.get(e.get("nivel"), e.get("nivel") or "")
+                           + (f" · {e['motivo']}" if e.get("motivo") else "")]))
+    filas.sort(key=lambda f: f[0], reverse=True)
+    tarjetas = []
+    if filas:
+        tabla = [[vigia.hora_corta(h)] + f for h, f in filas[:25]]
+        tarjetas.append({"tipo": "tabla",
+                         "titulo": f"Sucesos {periodo}" + (f" (25 de {len(filas)})" if len(filas) > 25 else ""),
+                         "columnas": ["Cuándo", "Origen", "Qué", "Detalle"], "filas": tabla})
+    return resp(voz, tarjetas=tarjetas)
+
+
 def novedades_servicios(desde: datetime | None, vigia_caido: bool = False) -> tuple[str, list]:
     """Una frase (o "") con las caídas que EMPEZARON desde `desde`, y su tabla.
     Con `vigia_caido` (el hilo de alertas ya sabe que no responde) no se espera el timeout."""
@@ -429,6 +539,7 @@ COMANDOS = {
     "clima": ("[ciudad] [mañana|semana]", "el clima"),
     "servicios": ("", "estado de tus servicios"),
     "seguridad": ("", "seguridad de tus servidores"),
+    "sucesos": ("[horas, 24 por defecto]", "lo importante de tus servicios en las últimas horas"),
     "volumen": ("[0-100|sube|baja]", "volumen de la PC"),
     "silencio": ("", "silencia la PC"),
     "sonido": ("", "quita el silencio"),
@@ -446,7 +557,8 @@ COMANDOS = {
 ALIAS_COMANDOS = {"h": "hora", "help": "ayuda", "comandos": "ayuda", "manana": "agenda manana",
                   "hoy": "agenda", "tiempo": "clima", "vol": "volumen", "mute": "silencio", "play": "pausa",
                   "timer": "temporizador", "alarma": "temporizador", "bloquea": "bloquear", "abre": "abrir",
-                  "buenosdias": "dia", "resumen": "dia", "srv": "servicios", "seg": "seguridad"}
+                  "buenosdias": "dia", "resumen": "dia", "srv": "servicios", "seg": "seguridad",
+                  "novedades": "sucesos", "incidentes": "sucesos", "24h": "sucesos 24", "48h": "sucesos 48"}
 
 
 def lista_comandos() -> list[list[str]]:
@@ -492,6 +604,11 @@ def expandir_comando(texto: str) -> tuple[str, dict | None]:
         if args[0] in ("baja", "-", "menos", "bajar"):
             return "baja el volumen", None
         return texto, resp("Usa /volumen con un número del 0 al 100, «sube» o «baja».")
+    if nombre == "sucesos":
+        m = re.fullmatch(r"(\d{1,3})\s*(h|hr|hrs|horas?)?", resto) if resto else None
+        if resto and not m:
+            return texto, resp("Usa /sucesos con un número de horas, por ejemplo /sucesos 48.")
+        return f"que paso con mis servicios en las ultimas {m.group(1) if m else 24} horas", None
     if nombre == "musica":
         return (f"pon musica de {resto}" if resto else "pon musica"), None
     if nombre == "podcast":
@@ -626,6 +743,11 @@ def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
         import vigia
         if vigia.configurado():
             return servicios()
+    m = SUCESOS.fullmatch(t)
+    if m:
+        import vigia
+        if vigia.configurado():
+            return sucesos(int(m.group("h1") or m.group("h2")))
     if SEGURIDAD.fullmatch(t):
         import vigia
         if vigia.configurado():
