@@ -449,5 +449,13 @@ body.panel #panel { border-left: 1px solid var(--borde); }
 .alerta.critico .t { font-weight: 600; }
 .alerta .m { display: flex; flex-wrap: wrap; gap: 0 8px; margin-top: 2px; font-size: 11px; color: var(--tenue); }
 .alerta .m span { overflow-wrap: anywhere; }
+.alerta .motivo { margin-top: 2px; font-size: 11.5px; color: var(--texto-2); line-height: 1.35; overflow-wrap: anywhere; }
+.alerta .origen {
+  display: inline-block; vertical-align: 1px; margin-right: 6px; padding: 0 5px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; line-height: 15px;
+  color: var(--tenue); background: var(--superficie-2);
+}
+.alerta .origen[data-origen="seguridad"] { color: var(--acento-2); background: color-mix(in srgb, var(--acento-2) 14%, transparent); }
+.alerta .origen[data-origen="salud"] { color: var(--acento); background: color-mix(in srgb, var(--acento) 14%, transparent); }
 .alerta .btn.visto { padding: 3px 9px; font-size: 11.5px; color: var(--c); border-color: color-mix(in srgb, var(--c) 35%, transparent); }
 .alerta.saliendo { opacity: 0; transform: translateX(12px); }

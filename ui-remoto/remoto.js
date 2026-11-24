@@ -192,6 +192,8 @@ function desdeTexto(iso) {
   return `desde ${hoy ? "" : d.toLocaleDateString("es-MX", { day: "numeric", month: "short" }) + ", "}${h}`;
 }
 
+const ORIGENES = { kuma: "servicio", salud: "salud", seguridad: "seguridad" };
+
 function pintarBanda(s) {
   const banda = $("#banda-alertas");
   const criticas = (s?.alertas || []).filter(a => a.severidad === "critico" && !a.reconocida && !vistasLocal.has(a.id));
@@ -202,8 +204,11 @@ function pintarBanda(s) {
   if (!criticas.length) { banda.innerHTML = ""; return; }
   banda.innerHTML = `<div class="banda-cab"><b>${criticas.length === 1 ? "Alerta crítica" : `${criticas.length} alertas críticas`}</b></div>`;
   for (const a of criticas) {
+    const origen = ORIGENES[a.origen] || a.origen || "";
+    const texto = a.origen ? (a.texto || a.monitor || "Alerta").replace(` · ${a.origen}:`, ":") : (a.texto || a.monitor || "Alerta");
     const fila = el(`<div class="banda-fila">
-        <div class="banda-info"><span class="t">${esc(a.texto || a.monitor || "Alerta")}</span>
+        <div class="banda-info"><span class="t">${origen ? `<span class="origen">${esc(origen)}</span>` : ""}${esc(texto)}</span>
+          ${a.motivo ? `<span class="motivo">${esc(a.motivo)}</span>` : ""}
           <span class="m">${esc(desdeTexto(a.desde))}</span></div>
         <button class="visto">Visto</button>
       </div>`);

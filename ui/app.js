@@ -421,6 +421,14 @@ function desdeTexto(iso) {
   return `desde ${dia}${hora(d)} (${haceTexto(d)})`;
 }
 
+const ORIGENES = { kuma: "servicio", salud: "salud", seguridad: "seguridad" };
+
+// el vigía manda "host · seguridad: qué pasa"; con la etiqueta de origen sobra el " · seguridad"
+function textoAlerta(a) {
+  const t = a.texto || a.monitor || "Alerta";
+  return a.origen ? t.replace(` · ${a.origen}:`, ":") : t;
+}
+
 function pintarServicios() {
   const s = serviciosDatos, sec = $("#servicios");
   sec.hidden = !s?.configurado;
@@ -452,11 +460,13 @@ function pintarServicios() {
   for (const a of activas) {
     if (a.reconocida || (plegada && a.severidad !== "critico")) continue;
     const silencio = a.caido_en_silencio && !/silencio/i.test(a.texto || "") ? "caído en silencio" : "";
-    const meta = [desdeTexto(a.desde), silencio, a.msg || ""].filter(Boolean);
+    const meta = [desdeTexto(a.desde), silencio, a.msg && a.msg !== a.motivo ? a.msg : ""].filter(Boolean);
+    const origen = ORIGENES[a.origen] || a.origen || "";
     const li = el(`<li class="alerta ${a.severidad === "critico" ? "critico" : "atencion"}">
         <i class="marca"></i>
         <div class="info">
-          <div class="t">${esc(a.texto || a.monitor || "Alerta")}</div>
+          <div class="t">${origen ? `<span class="origen" data-origen="${esc(a.origen)}">${esc(origen)}</span>` : ""}${esc(textoAlerta(a))}</div>
+          ${a.motivo ? `<div class="motivo">${esc(a.motivo)}</div>` : ""}
           ${meta.length ? `<div class="m">${meta.map(x => `<span>${esc(x)}</span>`).join("")}</div>` : ""}
         </div>
         <button class="btn visto" title="Marcar como vista">Visto</button>
