@@ -321,6 +321,72 @@ def servicios() -> dict:
                                 "columnas": ["Servicio", "Estado", "Desde", "Detalle"], "filas": filas}])
 
 
+SEGURIDAD = re.compile(
+    r"(como|que tal) (esta|anda|va) la seguridad( de (mis|los) (servidores|servicios))?( hoy| ahora)?|"
+    r"(dame el |cual es el )?estado de (la )?seguridad( de (mis|los) servidores)?|"
+    r"(hay )?algo raro en (mis|los) (servidores|servicios)( hoy| ahora)?|"
+    r"(hay )?(algun|algo de) (problema|aviso|alerta) de seguridad( hoy| ahora)?")
+
+
+def seguridad() -> dict:
+    """«¿Cómo está la seguridad?» → frase corta + tabla por host (y el CSD si viene)."""
+    import vigia
+    try:
+        r = vigia.seguridad()
+    except vigia.ErrorVigia as err:
+        return resp(f"{err}.")
+    hosts = r.get("hosts") or {}
+    corto = lambda h: h.split(".")[0]  # "web1.ejemplo.com" → "web1", más natural en voz
+    sin_parentesis = lambda t: re.sub(r"\s*\([^)]*\)", "", str(t)).strip()
+    avisos = []  # (nivel, quién, texto) de lo crítico o de atención
+    filas = []
+    for host, d in hosts.items():
+        hall = d.get("hallazgos") or []
+        avisos += [(h.get("nivel"), corto(host), h.get("texto") or h.get("id")) for h in hall
+                   if h.get("nivel") in ("critico", "atencion")]
+        m = d.get("metricas") or {}
+        datos = [f"{etq}: {vigia.valor_metrica(m[k])}" for k, etq in (
+            ("ssh_fallidos_24h", "SSH fallidos 24 h"), ("ips_baneadas_ahora", "baneadas"),
+            ("paquetes_seguridad", "paq. seguridad"), ("disco_max_pct", "disco %"),
+            ("tls_dias_min", "TLS días")) if m.get(k) is not None]
+        filas.append([host, vigia.NIVELES.get(d.get("status"), d.get("status") or "?")
+                      + (" · sin datos recientes" if vigia.sin_datos(d) else ""),
+                      "; ".join(("" if h.get("nivel") in ("critico", "atencion") else "[info] ")
+                                + str(h.get("texto") or h.get("id")) for h in hall) or "—",
+                      " · ".join(datos)])
+    csd = r.get("csd")
+    if csd:
+        hall = csd.get("hallazgos") or []
+        avisos += [(h.get("nivel"), "los certificados de sello", h.get("texto") or h.get("id")) for h in hall
+                   if h.get("nivel") in ("critico", "atencion")]
+        p = csd.get("proximo") or {}
+        filas.append(["CSD", vigia.NIVELES.get(csd.get("status"), csd.get("status") or "?")
+                      + (" · sin datos recientes" if vigia.sin_datos(csd) else ""),
+                      "; ".join(str(h.get("texto") or h.get("id")) for h in hall) or "—",
+                      f"{csd.get('certificados', '?')} certificados"
+                      + (f" · el próximo vence {p.get('vence')} ({p.get('dias')} días)" if p else "")])
+    viejos = [corto(h) for h, d in hosts.items() if vigia.sin_datos(d)]
+    n = len(hosts)
+    if not avisos:
+        voz = f"La seguridad está en orden en {'el servidor' if n == 1 else f'los {n} servidores'}."
+    else:
+        avisos.sort(key=lambda a: a[0] != "critico")
+        criticos = sum(1 for a in avisos if a[0] == "critico")
+        por_quien = {}  # agrupados por servidor, críticos primero
+        for _, quien, texto in avisos:
+            t = re.sub(r"\s+desde \d{4}-\d\d-\d\d\S*", "", sin_parentesis(texto))
+            por_quien.setdefault(quien, []).append(t[:1].lower() + t[1:])
+        partes = [f"en {quien}, {lista(textos)}" for quien, textos in list(por_quien.items())[:3]]
+        voz = (f"Hay {len(avisos)} aviso{'s' if len(avisos) != 1 else ''} de seguridad"
+               + ("" if not criticos else f", {criticos} crítico{'s' if criticos != 1 else ''}") + ": "
+               + "; ".join(partes)
+               + (f"; y en {len(por_quien) - 3} servidores más." if len(por_quien) > 3 else "."))
+    if viejos:
+        voz += f" No hay datos recientes de {lista(viejos)}."
+    return resp(voz, tarjetas=[{"tipo": "tabla", "titulo": "Seguridad por servidor",
+                                "columnas": ["Host", "Estado", "Hallazgos", "Datos"], "filas": filas}])
+
+
 def novedades_servicios(desde: datetime | None, vigia_caido: bool = False) -> tuple[str, list]:
     """Una frase (o "") con las caídas que EMPEZARON desde `desde`, y su tabla.
     Con `vigia_caido` (el hilo de alertas ya sabe que no responde) no se espera el timeout."""
@@ -461,6 +527,10 @@ def atajo(texto: str, motor, remoto: bool = False) -> dict | None:
         import vigia
         if vigia.configurado():
             return servicios()
+    if SEGURIDAD.fullmatch(t):
+        import vigia
+        if vigia.configurado():
+            return seguridad()
     m = re.fullmatch(r"(que|que cosas) tengo( agendado| en (la|mi) agenda| en el calendario| para)* (hoy|manana)"
                      r"( en (la|mi) agenda| en el calendario| agendado)?|(mi )?agenda (de|para) (hoy|manana)|"
                      r"que hay (hoy|manana) en (la|mi) agenda", t)
