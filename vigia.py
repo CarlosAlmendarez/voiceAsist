@@ -8,6 +8,7 @@ queda apagado.
 Claude lo lee como herramienta desde el modo pregunta:
     python vigia.py estado [--todos]
     python vigia.py alertas
+    python vigia.py seguridad
     python vigia.py incidentes [--desde hoy|ayer|AAAA-MM-DD[THH:MM]] [--hasta ...] [--dias N]
 
 Nunca imprime la clave ni la URL del vigía."""
@@ -25,6 +26,19 @@ BASE = Path(__file__).parent
 TIEMPO_ESPERA = 5  # segundos
 DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
 ESTADOS = {"up": "arriba", "down": "caídos", "pending": "pendientes", "maintenance": "en mantenimiento"}
+NIVELES = {"ok": "ok", "critico": "crítico", "atencion": "atención", "info": "informativo"}
+ORIGENES = {"kuma": "servicio", "salud": "salud", "seguridad": "seguridad"}
+# métricas de /api/seguridad → etiqueta legible (las desconocidas se imprimen tal cual)
+METRICAS = {
+    "ssh_fallidos_1h": "SSH fallidos 1 h", "ssh_fallidos_24h": "SSH fallidos 24 h",
+    "ssh_accesos_24h": "accesos SSH 24 h", "ssh_ips_nuevas_24h": "IPs SSH nuevas 24 h",
+    "fail2ban_activo": "fail2ban activo", "ips_baneadas_ahora": "IPs baneadas ahora", "bans_24h": "baneos 24 h",
+    "web_peticiones_1h": "peticiones web 1 h", "web_4xx_1h": "web 4xx 1 h", "web_5xx_1h": "web 5xx 1 h",
+    "disco_max_pct": "disco máx. %", "ram_pct": "RAM %", "swap_pct": "swap %", "carga_por_nucleo": "carga por núcleo",
+    "pm2_reinicios_24h": "reinicios pm2 24 h", "pm2_no_online": "pm2 fuera de línea",
+    "paquetes_pendientes": "paquetes pendientes", "paquetes_seguridad": "paquetes de seguridad",
+    "reinicio_requerido": "reinicio requerido", "tls_dias_min": "días para que venza TLS",
+}
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 
@@ -74,15 +88,27 @@ def estado() -> dict:
 
 
 def alertas() -> dict:
-    """{generado, total, criticas, atencion, alertas: [{id, tipo, severidad, monitor_id,
-    monitor, grupo, desde, duracion, caido_en_silencio, msg, texto}]}"""
+    """{generado, total, criticas, atencion, alertas: [{id, tipo, origen (kuma|salud|seguridad),
+    severidad, motivo?, desde, duracion, texto, ...}]}. Las de Kuma traen monitor_id, monitor,
+    grupo, caido_en_silencio, msg; las de seguridad traen nivel, host, grupo, hallazgo,
+    vigente, dato_de. `motivo` puede faltar."""
     return _pedir("/api/alertas")
+
+
+def seguridad() -> dict:
+    """{generado, resumen: {critico, atencion, info}, hosts: {host: {status, vigente, ultimo_dato,
+    edad_dato, ultimo_intento, sin_respuesta_desde, error, edad_reporte, hallazgos: [{id, nivel,
+    texto, desde, hace}], metricas: {...}}}, csd: {status, vigente, ultimo_dato, edad_dato,
+    sin_respuesta_desde, error, aviso_dias, certificados, proximo: {rfc, vence, dias},
+    sin_certificado: [rfc], hallazgos}, recolector: {intervalo_s, ultimo_ciclo}}"""
+    return _pedir("/api/seguridad")
 
 
 def incidentes(desde: datetime, hasta: datetime) -> dict:
     """{desde, hasta, total_incidentes, en_curso, uptime_pct, por_grupo, por_monitor,
     incidentes: [{monitor_id, monitor, grupo, critico, inicio, fin, en_curso, duracion_s,
-    duracion, msg}]}. Fechas sin zona = hora local."""
+    duracion, msg, motivo?}], eventos_seguridad: [{hora, host, fuente, tipo, clave, nivel,
+    nivel_anterior, texto}], eventos_salud: [...], nota_uptime}. Fechas sin zona = hora local."""
     return _pedir("/api/incidentes", {"desde": iso(desde), "hasta": iso(hasta)})
 
 
@@ -134,6 +160,11 @@ def nombre_monitor(m: dict) -> str:
         else str(m.get("nombre") or m.get("monitor"))
 
 
+def nombre_alerta(x: dict) -> str:
+    """Nombre corto de lo afectado: el monitor, el host o el texto de la alerta."""
+    return str(x.get("monitor") or x.get("host") or x.get("texto") or "alerta")
+
+
 def fecha(texto: str, fin: bool = False) -> datetime:
     """hoy|ayer|ahora|AAAA-MM-DD[THH:MM] → datetime local sin zona."""
     t = texto.strip().lower()
@@ -176,8 +207,16 @@ def cli_alertas() -> int:
     lista = a.get("alertas", [])
     print(f"Alertas: {a.get('total', len(lista))} ({a.get('criticas', 0)} críticas, {a.get('atencion', 0)} de atención)")
     for x in lista:
-        print(f"- [{x.get('severidad')}] {x.get('texto') or nombre_monitor(x)} | desde {hora_corta(leer_hora(x.get('desde')))}"
-              + (f" | {str(x['msg'])[:120]}" if x.get("msg") else ""))
+        origen = ORIGENES.get(x.get("origen"), x.get("origen"))
+        partes = [f"- [{x.get('severidad')}{' · ' + origen if origen else ''}] {x.get('texto') or nombre_monitor(x)}",
+                  f"desde {hora_corta(leer_hora(x.get('desde')))}"]
+        if x.get("motivo"):
+            partes.append(f"motivo: {str(x['motivo'])[:160]}")
+        if x.get("msg") and x.get("msg") != x.get("motivo"):
+            partes.append(str(x["msg"])[:120])
+        if x.get("vigente") is False:
+            partes.append(f"dato no vigente (de {hora_corta(leer_hora(x.get('dato_de')))})")
+        print(" | ".join(partes))
     if not lista:
         print("(ninguna)")
     return 0
@@ -198,7 +237,9 @@ def cli_incidentes(desde: datetime, hasta: datetime) -> int:
                   + ")"]
         if i.get("critico"):
             partes.append("crítico")
-        if i.get("msg"):
+        if i.get("motivo"):
+            partes.append(f"motivo: {str(i['motivo'])[:160]}")
+        if i.get("msg") and i.get("msg") != i.get("motivo"):
             partes.append(str(i["msg"])[:120])
         print(" | ".join(partes))
     for g, d in (r.get("por_grupo") or {}).items():
@@ -207,6 +248,73 @@ def cli_incidentes(desde: datetime, hasta: datetime) -> int:
                   f"{d.get('monitores', '?')} monitores, caído {d.get('caido', '?')}, disponibilidad {d.get('uptime_pct', '?')} %")
     if not lista:
         print("(ninguno)")
+    for clave, titulo in (("eventos_seguridad", "Eventos de seguridad"), ("eventos_salud", "Eventos de salud")):
+        eventos = r.get(clave) or []
+        if eventos:
+            print(f"{titulo}: {len(eventos)}")
+        for ev in eventos:
+            nivel = NIVELES.get(ev.get("nivel"), ev.get("nivel"))
+            antes = f" (antes {NIVELES.get(ev['nivel_anterior'], ev['nivel_anterior'])})" if ev.get("nivel_anterior") else ""
+            print(f"- {hora_corta(leer_hora(ev.get('hora')))} {ev.get('host') or ev.get('fuente') or ''}: "
+                  f"[{nivel}{antes}] {ev.get('texto') or ev.get('clave')}"
+                  + (f" ({ev['tipo']})" if ev.get("tipo") and ev.get("tipo") != "hallazgo" else "")
+                  + (f" | motivo: {ev['motivo']}" if ev.get("motivo") else ""))
+    return 0
+
+
+def valor_metrica(v) -> str:
+    if isinstance(v, bool):
+        return "sí" if v else "no"
+    if isinstance(v, list):
+        return ", ".join(map(str, v)) or "ninguno"
+    return str(v)
+
+
+def sin_datos(d: dict) -> str:
+    """Aviso si el dato de un host (o del CSD) no está al día; "" si lo está."""
+    if d.get("vigente") is not False and not d.get("sin_respuesta_desde"):
+        return ""
+    texto = "SIN DATOS RECIENTES"
+    if d.get("sin_respuesta_desde"):
+        texto += f" (no responde desde {hora_corta(leer_hora(d['sin_respuesta_desde']))})"
+    if d.get("error"):
+        texto += f": {str(d['error'])[:120]}"
+    return texto
+
+
+def cli_seguridad() -> int:
+    r = seguridad()
+    res = r.get("resumen") or {}
+    c, i = res.get("critico", 0), res.get("info", 0)
+    print(f"Seguridad: {c} crítico{'s' if c != 1 else ''} · {res.get('atencion', 0)} de atención · "
+          f"{i} informativo{'s' if i != 1 else ''} (revisado {hora_corta(leer_hora(r.get('generado')))})")
+    for host, d in (r.get("hosts") or {}).items():
+        partes = [f"- {host}: {NIVELES.get(d.get('status'), d.get('status'))}"
+                  + (f" (dato de hace {d['edad_dato']})" if d.get("edad_dato") else ""),
+                  sin_datos(d),
+                  " · ".join(f"{METRICAS.get(k, k)}: {valor_metrica(v)}"
+                             for k, v in (d.get("metricas") or {}).items() if v is not None)]
+        print(" | ".join(p for p in partes if p))
+        for h in d.get("hallazgos") or []:
+            print(f"    · [{NIVELES.get(h.get('nivel'), h.get('nivel'))}] {h.get('texto') or h.get('id')}"
+                  f" (desde {hora_corta(leer_hora(h.get('desde')))})"
+                  + (f" | motivo: {h['motivo']}" if h.get("motivo") else ""))
+    csd = r.get("csd")
+    if csd:
+        partes = [f"- CSD (certificados de sello digital): {NIVELES.get(csd.get('status'), csd.get('status'))}",
+                  sin_datos(csd)]
+        if csd.get("certificados") is not None:
+            partes.append(f"{csd['certificados']} certificados")
+        p = csd.get("proximo") or {}
+        if p:
+            partes.append(f"el próximo vence {p.get('vence')} ({p.get('rfc')}, en {p.get('dias')} días)")
+        if csd.get("sin_certificado"):
+            partes.append(f"sin certificado: {', '.join(map(str, csd['sin_certificado']))}")
+        print(" | ".join(x for x in partes if x))
+        for h in csd.get("hallazgos") or []:
+            print(f"    · [{NIVELES.get(h.get('nivel'), h.get('nivel'))}] {h.get('texto') or h.get('id')}")
+    if not r.get("hosts") and not csd:
+        print("(sin datos)")
     return 0
 
 
@@ -218,6 +326,7 @@ def main() -> int:
     e = sub.add_parser("estado", help="servicios que no están arriba")
     e.add_argument("--todos", action="store_true", help="lista también los que están arriba")
     sub.add_parser("alertas", help="alertas activas")
+    sub.add_parser("seguridad", help="seguridad de los servidores: hallazgos y métricas por host")
     i = sub.add_parser("incidentes", help="caídas en un rango de fechas")
     i.add_argument("--desde", default="hoy", help="hoy, ayer o AAAA-MM-DD[THH:MM] (hora local)")
     i.add_argument("--hasta", help="ahora (por defecto), hoy, ayer o AAAA-MM-DD[THH:MM]; es exclusivo")
@@ -228,6 +337,8 @@ def main() -> int:
             return cli_estado(a.todos)
         if a.orden == "alertas":
             return cli_alertas()
+        if a.orden == "seguridad":
+            return cli_seguridad()
         desde = fecha(a.desde)
         if a.hasta:
             hasta = fecha(a.hasta)
