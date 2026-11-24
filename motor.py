@@ -103,7 +103,14 @@ emitir = lambda evento: None  # la interfaz lo reemplaza
 def log(msg: str) -> None:
     linea = f"[{time.strftime('%H:%M:%S')}] {msg}"
     if sys.stdout:
-        print(linea, flush=True)
+        try:
+            print(linea, flush=True)
+        except UnicodeEncodeError:
+            # pythonw lanzado desde iniciar.bat puede heredar una salida en cp1252: sin "→", "«"...
+            cod = sys.stdout.encoding or "ascii"
+            print(linea.encode(cod, "replace").decode(cod), flush=True)
+        except (OSError, ValueError):
+            pass  # salida cerrada o inválida: queda el archivo
     with open(BASE / "asistente.log", "a", encoding="utf-8") as f:
         f.write(linea + "\n")
 
